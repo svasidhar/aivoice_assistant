@@ -3,17 +3,30 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 import sqlite3
+import bcrypt
 from typing import Optional, Dict, List
 
 Base = declarative_base()
 
 class DatabaseManager:
-    def __init__(self, db_path: str = "outage_data.db"):
-        self.db_path = db_path
-        self.init_database()
+    _instance = None
+    _conn = None
 
-    def init_database(self):
-        conn = sqlite3.connect(self.db_path)
+    def __new__(cls, db_path: str = "outage_data.db"):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.db_path = db_path
+            cls._instance._init_database()
+        return cls._instance
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get a connection, creating one if needed."""
+        if self._conn is None:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        return self._conn
+
+    def _init_database(self):
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute('''
@@ -120,10 +133,10 @@ class DatabaseManager:
             ''', ('Raju', '+91 9876543210', 'Ramanapet Substation', 'LM_Raju', 'password123'))
 
         conn.commit()
-        conn.close()
+        # Don't close the connection - it's shared for the singleton
 
-    def update_outage_info(self, area: str, issue: str, eta: str, status: str, staff_name: Optional[str] = None, reason: Optional[str] = None):
-        conn = sqlite3.connect(self.db_path)
+def update_outage_info(self, area: str, issue: str, eta: str, status: str, staff_name: Optional[str] = None, reason: Optional[str] = None):
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute("SELECT * FROM outages WHERE area = ?", (area,))
@@ -148,15 +161,12 @@ class DatabaseManager:
             ''', (area, issue, eta, status, datetime.now().isoformat(), staff_name, reason))
 
         conn.commit()
-        conn.close()
 
     def get_outage_info(self, area: str) -> Optional[Dict]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        cursor = self._get_connection().cursor()
 
         cursor.execute("SELECT * FROM outages WHERE area = ?", (area,))
         result = cursor.fetchone()
-        conn.close()
 
         if result:
             return {
@@ -171,12 +181,10 @@ class DatabaseManager:
         return None
 
     def get_all_outages(self) -> List[Dict]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+        cursor = self._get_connection().cursor()
 
         cursor.execute("SELECT * FROM outages")
         results = cursor.fetchall()
-        conn.close()
 
         outages = []
         for result in results:
@@ -193,7 +201,7 @@ class DatabaseManager:
         return outages
 
     def log_consumer_query(self, area: str, query: str, response: str):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute('''
@@ -202,10 +210,9 @@ class DatabaseManager:
         ''', (area, query, response, datetime.now().isoformat()))
 
         conn.commit()
-        conn.close()
 
     def log_staff_update(self, staff_id: str, area: str, update_text: str):
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
 
         cursor.execute('''
@@ -214,62 +221,59 @@ class DatabaseManager:
         ''', (staff_id, area, update_text, datetime.now().isoformat()))
 
         conn.commit()
-        conn.close()
 
     def get_assistant_state(self) -> Dict:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
+        cursor = self._get_connection().cursor()
+
         cursor.execute("SELECT value FROM assistant_settings WHERE key = 'ai_assistant_active'")
         active_res = cursor.fetchone()
         is_active = (active_res[0].lower() == 'true') if active_res else True
-        
+
         cursor.execute("SELECT value FROM assistant_settings WHERE key = 'lineman_phone'")
         phone_res = cursor.fetchone()
         phone = phone_res[0] if phone_res else "+91 9876543210"
-        
-        conn.close()
+
         return {"is_active": is_active, "lineman_phone": phone}
 
     def set_assistant_state(self, is_active: bool) -> None:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         val_str = 'true' if is_active else 'false'
         cursor.execute("UPDATE assistant_settings SET value = ? WHERE key = 'ai_assistant_active'", (val_str,))
-        
+
         conn.commit()
-        conn.close()
 
     def create_user(self, name: str, phone: str, substation: str, staff_id: str, password: str, cadre: str = "LM") -> bool:
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
         try:
+            # Hash password with bcrypt before storing
+            hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt(rounds=12))
             cursor.execute('''
                 INSERT INTO users (name, phone, substation, staff_id, password, cadre)
                 VALUES (?, ?, ?, ?, ?, ?)
-            ''', (name, phone, substation, staff_id, password, cadre))
+            ''', (name, phone, substation, staff_id, hashed.decode('utf-8'), cadre))
             conn.commit()
             return True
         except sqlite3.IntegrityError:
             return False
-        finally:
-            conn.close()
 
     def verify_user(self, staff_id: str, password: str) -> Optional[Dict]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, phone, substation, staff_id, cadre FROM users WHERE staff_id = ? AND password = ?", (staff_id, password))
+        cursor = self._get_connection().cursor()
+        cursor.execute("SELECT name, phone, substation, staff_id, cadre, password FROM users WHERE staff_id = ?", (staff_id,))
         res = cursor.fetchone()
-        conn.close()
         if res:
-            return {
-                "name": res[0],
-                "phone": res[1],
-                "substation": res[2],
-                "staff_id": res[3],
-                "cadre": res[4]
-            }
+            # Verify password against bcrypt hash
+            stored_hash = res[5].encode('utf-8')
+            if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
+                return {
+                    "name": res[0],
+                    "phone": res[1],
+                    "substation": res[2],
+                    "staff_id": res[3],
+                    "cadre": res[4]
+                }
         return None
 
     def save_call_log(self, caller_number: str, transcript: str, audio_path: str, status: str) -> int:

@@ -188,6 +188,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private val isTtsSpeakingState = mutableStateOf(false)
     private var conversationStep = 0
     private var detectedArea = ""
+    private var sttRetryCount = 0
+    private val maxSttRetries = 5
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -338,6 +340,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         conversationStep = 0
         detectedArea = ""
+        sttRetryCount = 0
 
         callTranscriptState.add("System" to "Incoming call from unknown number $callerNumber intercepted.")
 
@@ -414,7 +417,19 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {}
                 override fun onError(error: Int) {
-                    Log.e("STT", "Error code: $error")
+                    Log.e("STT", "Error code: $error, retry count: $sttRetryCount")
+                    sttRetryCount++
+
+                    if (sttRetryCount >= maxSttRetries) {
+                        Log.e("STT", "Max STT retries reached, forwarding to operator")
+                        runOnUiThread {
+                            callTranscriptState.add("System" to "Speech recognition failed after ${maxSttRetries} attempts. Forwarding to operator.")
+                            val forwardNumber = sharedPrefs.getString("substation_forward_number", "+919876543210") ?: "+919876543210"
+                            performCallTransfer(forwardNumber)
+                        }
+                        return
+                    }
+
                     if (isCallActiveState.value && !isForwardedToOperatorState.value && !isTtsSpeakingState.value) {
                         listenToCaller()
                     }

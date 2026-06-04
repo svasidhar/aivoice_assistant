@@ -1,11 +1,29 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Form
-from pydantic import BaseModel
+from fastapi import APIRouter, UploadFile, File, HTTPException, Header, Depends
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
-import sqlite3
+import re
 import sys
+import structlog
+import jwt
+from functools import wraps
+
+# Setup structured logging
+structlog.configure(
+    processors=[
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer()
+    ],
+    wrapper_class=structlog.stdlib.BoundLogger,
+    context_class=dict,
+    logger_factory=structlog.stdlib.LoggerFactory(),
+)
+logger = structlog.get_logger()
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +33,39 @@ from models.database import DatabaseManager
 from voice_processing.voice_processor import VoiceProcessor
 from config.settings import Config
 from models.nlp_model import CustomNLPModel
+from api.session_manager import session_manager
+
+# JWT secret for auth middleware
+JWT_SECRET = os.getenv("JWT_SECRET", "tgspdcl-secret-key-change-in-production")
+JWT_ALGORITHM = "HS256"
+
+
+# ============= JWT Authentication Dependency =============
+
+async def get_current_user(authorization: Optional[str] = Header(None)) -> Optional[dict]:
+    """
+    Extract and verify JWT token from Authorization header.
+    Returns None if no token or invalid (allows public access).
+    For protected routes, use require_auth wrapper.
+    """
+    if not authorization:
+        return None
+
+    # Extract token from "Bearer <token>" format
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+
+    token = parts[1]
+    payload = verify_token(token)
+    return payload
+
+
+def require_auth(user: Optional[dict] = Depends(get_current_user)):
+    """Dependency that requires valid authentication."""
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
 
 try:
     import google.generativeai as genai
@@ -33,52 +84,200 @@ voice_processor = VoiceProcessor(Config.OPENAI_API_KEY)
 nlp_model = CustomNLPModel()
 
 class VoiceUpdateRequest(BaseModel):
-    area: str
-    issue: str
-    eta: str
-    status: str
-    staff_name: Optional[str] = None
+    area: str = Field(..., min_length=1, max_length=100, description="Area name must be 1-100 characters")
+    issue: str = Field(..., min_length=1, max_length=500, description="Issue description must be 1-500 characters")
+    eta: str = Field(..., min_length=1, max_length=100, description="ETA must be 1-100 characters")
+    status: str = Field(..., min_length=1, max_length=50, description="Status must be 1-50 characters")
+    staff_name: Optional[str] = Field(None, max_length=100, description="Staff name must be under 100 characters")
+
+    @field_validator('area')
+    @classmethod
+    def validate_area(cls, v):
+        if not v or v.strip() == "" or v.lower() in ["unknown", "none", "null"]:
+            raise ValueError("Area cannot be empty, unknown, none, or null")
+        # Sanitize: allow only alphanumeric, spaces, and common Indian place name chars
+        if not re.match(r'^[a-zA-Z0-9\s_\-\'\.]+$', v):
+            raise ValueError("Area contains invalid characters")
+        return v.strip()
+
+    @field_validator('status')
+    @classmethod
+    def validate_status(cls, v):
+        allowed_statuses = ["In Progress", "Pending", "Solved", "Restored", "Completed", "Investigating"]
+        if v not in allowed_statuses:
+            raise ValueError(f"Status must be one of: {', '.join(allowed_statuses)}")
+        return v
+
 
 class ConsumerQueryRequest(BaseModel):
-    area: str
-    query: str
+    area: str = Field(..., min_length=1, max_length=100, description="Area name must be 1-100 characters")
+    query: str = Field(..., min_length=1, max_length=1000, description="Query must be 1-1000 characters")
+    session_id: Optional[str] = Field(None, description="Session ID for conversation state tracking")
+
+    @field_validator('area')
+    @classmethod
+    def validate_area(cls, v):
+        if not v or v.strip() == "":
+            raise ValueError("Area cannot be empty")
+        return v.strip()
+
 
 class VoiceNoteRequest(BaseModel):
-    staff_id: str
-    update_text: str
+    staff_id: str = Field(..., min_length=1, max_length=50, description="Staff ID must be 1-50 characters")
+    update_text: str = Field(..., min_length=1, max_length=2000, description="Update text must be 1-2000 characters")
+
+    @field_validator('staff_id')
+    @classmethod
+    def validate_staff_id(cls, v):
+        if not re.match(r'^[a-zA-Z0-9_\-]+$', v):
+            raise ValueError("Staff ID contains invalid characters")
+        return v
+
 
 class AssistantToggleRequest(BaseModel):
     is_active: bool
 
+
 class SignupRequest(BaseModel):
-    name: str
-    phone: str
-    substation: str
-    employee_id: str
-    password: str
-    cadre: str
+    name: str = Field(..., min_length=1, max_length=100, description="Name must be 1-100 characters")
+    phone: str = Field(..., min_length=10, max_length=15, description="Phone must be 10-15 characters")
+    substation: str = Field(..., min_length=1, max_length=100, description="Substation must be 1-100 characters")
+    employee_id: str = Field(..., min_length=1, max_length=50, description="Employee ID must be 1-50 characters")
+    password: str = Field(..., min_length=6, max_length=128, description="Password must be 6-128 characters")
+    cadre: str = Field(default="LM", max_length=50, description="Cadre must be under 50 characters")
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v):
+        # Allow common phone formats: +91 9876543210, 9876543210, etc.
+        if not re.match(r'^[\+]?[0-9\s\-]{10,15}$', v):
+            raise ValueError("Invalid phone number format")
+        return v
+
 
 class LoginRequest(BaseModel):
-    employee_id: str
-    password: str
+    employee_id: str = Field(..., min_length=1, max_length=50, description="Employee ID must be 1-50 characters")
+    password: str = Field(..., min_length=1, max_length=128, description="Password must be 1-128 characters")
+
 
 class OutageStatusUpdateRequest(BaseModel):
+<<<<<<< HEAD
     area: str
     status: str
     staff_name: Optional[str] = None
     reason: Optional[str] = None
+=======
+    area: str = Field(..., min_length=1, max_length=100, description="Area name must be 1-100 characters")
+    status: str = Field(..., min_length=1, max_length=50, description="Status must be 1-50 characters")
+    staff_name: Optional[str] = Field(None, max_length=100, description="Staff name must be under 100 characters")
+
+    @field_validator('status')
+    @classmethod
+    def validate_status(cls, v):
+        allowed_statuses = ["In Progress", "Pending", "Solved", "Restored", "Completed", "Investigating"]
+        if v not in allowed_statuses:
+            raise ValueError(f"Status must be one of: {', '.join(allowed_statuses)}")
+        return v
+>>>>>>> 819d7d4 (feat: Security and reliability improvements)
 
 @router.get("/")
 async def root():
+    logger.info("Root endpoint accessed")
     return {"message": "TGSPDCL AI Voice Call Assistant API"}
+
+@router.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    try:
+        db.get_assistant_state()
+        db_status = "healthy"
+    except Exception as e:
+        logger.error("Database health check failed", error=str(e))
+        db_status = "unhealthy"
+
+    return {
+        "status": db_status,
+        "timestamp": datetime.now().isoformat()
+    }
+
+# ============= JWT Auth Helper Functions =============
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create JWT access token for authenticated users."""
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(hours=24))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+def verify_token(token: str) -> Optional[dict]:
+    """Verify JWT token and return payload."""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+# ============= Session Management Endpoints =============
+
+@router.post("/session/start/")
+async def start_conversation_session(caller_number: str):
+    """Start a new conversation session for an incoming call."""
+    session = session_manager.get_or_create_session(caller_number)
+    logger.info("Conversation session started", session_id=session.session_id, caller=caller_number)
+    return {
+        "session_id": session.session_id,
+        "caller_number": caller_number,
+        "step": session.step
+    }
+
+@router.get("/session/{session_id}/state/")
+async def get_conversation_state(session_id: str):
+    """Get current conversation state for a session."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session.session_id,
+        "step": session.step,
+        "detected_area": session.detected_area,
+        "forwarded": session.forwarded
+    }
+
+@router.post("/session/{session_id}/advance/")
+async def advance_conversation_step(session_id: str, area: Optional[str] = None):
+    """Advance conversation to next step."""
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if area:
+        session.detected_area = area
+    session.advance_step()
+    return {
+        "session_id": session.session_id,
+        "step": session.step,
+        "detected_area": session.detected_area
+    }
+
+@router.post("/session/{session_id}/end/")
+async def end_conversation_session(session_id: str):
+    """End a conversation session (call completed)."""
+    session_manager.end_session(session_id)
+    return {"message": "Session ended", "session_id": session_id}
+
+# ============= Consumer Query with Session Support =============
 
 @router.post("/voice-update/")
 async def process_voice_update(voice_update: VoiceUpdateRequest):
     """Process voice update from field staff"""
     try:
+        logger.info("Processing voice update", area=voice_update.area, status=voice_update.status)
+
         # Prevent database updates if the area is unrecognized, empty, or "Unknown"
         area = voice_update.area
         if not area or area.lower() == "unknown" or area.lower() == "none" or area.strip() == "":
+            logger.warn("Invalid area in voice update", area=voice_update.area)
             raise HTTPException(status_code=400, detail="Cannot update outage for unrecognized or empty area.")
 
         # Store the outage information in database
@@ -90,6 +289,7 @@ async def process_voice_update(voice_update: VoiceUpdateRequest):
             staff_name=voice_update.staff_name
         )
 
+        logger.info("Voice update processed successfully", area=area)
         return {
             "message": "Voice update processed successfully",
             "data": voice_update.dict()
@@ -97,6 +297,7 @@ async def process_voice_update(voice_update: VoiceUpdateRequest):
     except HTTPException as he:
         raise he
     except Exception as e:
+        logger.error("Error processing voice update", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing voice update: {str(e)}")
 
 @router.get("/outage-info/{area}")
@@ -120,14 +321,18 @@ async def get_assistant_state():
     return db.get_assistant_state()
 
 @router.post("/assistant-state/toggle/")
-async def toggle_assistant_state(req: AssistantToggleRequest):
-    """Toggle the AI assistant active state"""
+async def toggle_assistant_state(req: AssistantToggleRequest, user: Optional[dict] = Depends(get_current_user)):
+    """Toggle the AI assistant active state (requires authentication)"""
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    logger.info("Toggling assistant state", is_active=req.is_active, user=user.get("sub", "unknown"))
     db.set_assistant_state(req.is_active)
     return {"message": f"AI Assistant status updated to {req.is_active}", "is_active": req.is_active}
 
 @router.post("/auth/signup/")
 async def auth_signup(req: SignupRequest):
     """Register a new lineman account"""
+    logger.info("User signup attempt", employee_id=req.employee_id, substation=req.substation)
     success = db.create_user(
         name=req.name,
         phone=req.phone,
@@ -137,17 +342,32 @@ async def auth_signup(req: SignupRequest):
         cadre=req.cadre
     )
     if success:
-        return {"message": "Account created successfully", "employee_id": req.employee_id}
+        logger.info("User account created successfully", employee_id=req.employee_id)
+        # Generate JWT token for new user
+        token = create_access_token({"sub": req.employee_id, "name": req.name})
+        return {"message": "Account created successfully", "employee_id": req.employee_id, "access_token": token}
     else:
+        logger.warn("User signup failed - duplicate", employee_id=req.employee_id, phone=req.phone)
         raise HTTPException(status_code=400, detail="Employee ID or Phone Number already exists")
 
 @router.post("/auth/login/")
 async def auth_login(req: LoginRequest):
-    """Verify lineman credentials"""
+    """Verify lineman credentials and return JWT token"""
+    logger.info("User login attempt", employee_id=req.employee_id)
     user = db.verify_user(req.employee_id, req.password)
     if user:
+        logger.info("User login successful", employee_id=req.employee_id)
+        # Generate JWT token
+        token = create_access_token({
+            "sub": user["staff_id"],
+            "name": user["name"],
+            "substation": user["substation"],
+            "cadre": user["cadre"]
+        })
         return {
             "message": "Login successful",
+            "access_token": token,
+            "token_type": "bearer",
             "user": {
                 "name": user["name"],
                 "phone": user["phone"],
@@ -157,12 +377,16 @@ async def auth_login(req: LoginRequest):
             }
         }
     else:
+        logger.warn("User login failed - invalid credentials", employee_id=req.employee_id)
         raise HTTPException(status_code=401, detail="Invalid Employee ID or Password")
 
 @router.post("/outage/status/")
-async def update_outage_status(req: OutageStatusUpdateRequest):
-    """Update outage status and record the exact time of changed status"""
+async def update_outage_status(req: OutageStatusUpdateRequest, user: Optional[dict] = Depends(get_current_user)):
+    """Update outage status (requires authentication)"""
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
     try:
+        logger.info("Updating outage status", area=req.area, status=req.status, user=user.get("sub", "unknown"))
         # Fetch current outage details
         info = db.get_outage_info(req.area)
         if not info:
@@ -215,10 +439,10 @@ async def process_consumer_query(query: ConsumerQueryRequest):
             You are the TGSPDCL AI Voice Call Assistant, a friendly and polite customer service assistant responding to a consumer on a phone call.
             The consumer's query is: "{query.query}"
             The consumer's area is: "{query.area}"
-            
+
             Current Outage Status from the database for the area:
             {json.dumps(outage_info) if outage_info else "No active outage record found for this area."}
-            
+
             Instructions:
             1. Generate a friendly, polite, conversational reply in Telugu (using Telugu script). Keep it natural for voice communication.
             2. If there is an active outage in the database (status is In Progress, Pending, etc.):
@@ -237,7 +461,8 @@ async def process_consumer_query(query: ConsumerQueryRequest):
               "should_forward": true/false
             }}
             """
-            
+
+            result = None
             model_name = "gemini-1.5-flash"
             try:
                 model = genai.GenerativeModel(model_name)
@@ -245,26 +470,34 @@ async def process_consumer_query(query: ConsumerQueryRequest):
                     prompt,
                     generation_config={"response_mime_type": "application/json"}
                 )
+                result = json.loads(response.text)
             except Exception as model_err:
-                print(f"Failed to use model {model_name}, trying gemini-2.5-flash: {model_err}")
-                model_name = "gemini-2.5-flash"
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    prompt,
-                    generation_config={"response_mime_type": "application/json"}
-                )
-            
-            result = json.loads(response.text)
-            response_text = result.get("response", "")
-            should_forward = result.get("should_forward", False)
-            
-            db.log_consumer_query(query.area, query.query, response_text)
-            return {
-                "response": response_text,
-                "outage_info": outage_info,
-                "forwarded": should_forward,
-                "lineman_phone": settings['lineman_phone'] if should_forward else None
-            }
+                print(f"Gemini API error with {model_name}: {model_err}. Trying fallback model gemini-2.5-flash...")
+                try:
+                    model_name = "gemini-2.5-flash"
+                    model = genai.GenerativeModel(model_name)
+                    response = model.generate_content(
+                        prompt,
+                        generation_config={"response_mime_type": "application/json"}
+                    )
+                    result = json.loads(response.text)
+                except Exception as fallback_err:
+                    print(f"Fallback model {model_name} also failed: {fallback_err}")
+                    result = None
+
+            if result:
+                response_text = result.get("response", "")
+                should_forward = result.get("should_forward", False)
+
+                db.log_consumer_query(query.area, query.query, response_text)
+                return {
+                    "response": response_text,
+                    "outage_info": outage_info,
+                    "forwarded": should_forward,
+                    "lineman_phone": settings['lineman_phone'] if should_forward else None
+                }
+            else:
+                print("Gemini API returned no result, falling back to rule-based logic.")
         except Exception as gemini_err:
             print(f"Gemini API execution error: {str(gemini_err)}. Falling back to rule-based logic.")
 

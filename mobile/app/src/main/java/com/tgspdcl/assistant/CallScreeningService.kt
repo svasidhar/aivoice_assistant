@@ -179,7 +179,9 @@ class CallScreeningService : Service(), TextToSpeech.OnInitListener {
             override fun onDone(utteranceId: String?) {
                 isTtsSpeaking = false
                 if (isCallActive && !isForwarded) {
-                    onDone()
+                    serviceScope.launch(Dispatchers.Main) {
+                        onDone()
+                    }
                 }
             }
             @Deprecated("Deprecated in Java")

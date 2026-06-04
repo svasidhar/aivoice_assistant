@@ -2401,7 +2401,7 @@ fun CallLogsScreen(apiService: TgspdclApiService?, serverHost: String) {
         }
     }
 
-    LaunchedEffect(apiService) {
+    LaunchedEffect(Unit) {
         fetchLogs()
     }
 

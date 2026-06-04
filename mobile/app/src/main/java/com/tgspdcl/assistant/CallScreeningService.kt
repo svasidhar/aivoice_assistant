@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.MediaRecorder
 import android.media.RingtoneManager
 import android.net.Uri
@@ -65,6 +67,34 @@ class CallScreeningService : Service(), TextToSpeech.OnInitListener {
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
     }
 
+    private fun setSpeakerphone(on: Boolean) {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (on) {
+                    val speakerDevice = audioManager.availableCommunicationDevices.firstOrNull {
+                        it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
+                    }
+                    if (speakerDevice != null) {
+                        val success = audioManager.setCommunicationDevice(speakerDevice)
+                        Log.d("CallScreeningService", "Modern setCommunicationDevice speaker: $success")
+                    } else {
+                        Log.e("CallScreeningService", "Modern builtin speaker device not found")
+                    }
+                } else {
+                    audioManager.clearCommunicationDevice()
+                    Log.d("CallScreeningService", "Modern clearCommunicationDevice")
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.isSpeakerphoneOn = on
+                Log.d("CallScreeningService", "Legacy isSpeakerphoneOn set to $on")
+            }
+        } catch (e: Exception) {
+            Log.e("CallScreeningService", "Failed to set speakerphone: ${e.message}")
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val action = intent?.action
         Log.d("CallScreeningService", "onStartCommand action: $action")
@@ -105,11 +135,8 @@ class CallScreeningService : Service(), TextToSpeech.OnInitListener {
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            audioManager.isSpeakerphoneOn = true
-            Log.d("CallScreeningService", "Speakerphone forced to ON for screening.")
-        } catch (e: Exception) {
-            Log.e("CallScreeningService", "Failed to force speakerphone: ${e.message}")
-        }
+        } catch (e: Exception) {}
+        setSpeakerphone(true)
 
         // Start call audio recording
         startRecording()
@@ -363,13 +390,7 @@ class CallScreeningService : Service(), TextToSpeech.OnInitListener {
         }
 
         // Restore default earpiece audio routing so phone behaves normally during lineman talk
-        try {
-            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            audioManager.isSpeakerphoneOn = false
-            Log.d("CallScreeningService", "Speakerphone disabled for forwarding.")
-        } catch (e: Exception) {
-            Log.e("CallScreeningService", "Failed to disable speakerphone: ${e.message}")
-        }
+        setSpeakerphone(false)
 
         serviceScope.launch {
             delay(1500)
@@ -408,10 +429,8 @@ class CallScreeningService : Service(), TextToSpeech.OnInitListener {
         try {
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
             audioManager.mode = AudioManager.MODE_NORMAL
-            audioManager.isSpeakerphoneOn = false
-        } catch (e: Exception) {
-            Log.e("CallScreeningService", "Error resetting audio routing: ${e.message}")
-        }
+        } catch (e: Exception) {}
+        setSpeakerphone(false)
 
         // Disable speech components
         speechRecognizer?.stopListening()
@@ -502,6 +521,18 @@ class CallScreeningService : Service(), TextToSpeech.OnInitListener {
             val result = tts?.setLanguage(Locale("te", "IN"))
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
                 tts?.setLanguage(Locale.US)
+            }
+            
+            // Set audio attributes so TTS plays into the active voice communication stream!
+            try {
+                val audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                tts?.setAudioAttributes(audioAttributes)
+                Log.d("CallScreeningService", "TTS AudioAttributes configured for VOICE_COMMUNICATION")
+            } catch (e: Exception) {
+                Log.e("CallScreeningService", "Failed to set TTS AudioAttributes: ${e.message}")
             }
         }
     }

@@ -31,6 +31,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // Load assistant toggle state from SQLite
     loadAssistantState();
 
+    // Load operator settings from SQLite
+    loadOperatorState();
+
     // Load initial outages and start polling
     fetchOutages();
     setInterval(fetchOutages, 5000);
@@ -85,6 +88,12 @@ function setupEventListeners() {
     const switchEl = document.getElementById("ai-permission-switch");
     if (switchEl) {
         switchEl.addEventListener("change", handleAssistantSwitchToggle);
+    }
+
+    // Operator Available Switch change listener
+    const opSwitchEl = document.getElementById("operator-available-switch");
+    if (opSwitchEl) {
+        opSwitchEl.addEventListener("change", handleOperatorSwitchToggle);
     }
 
     // Extract manual details button listener
@@ -187,6 +196,82 @@ function updateAssistantSwitchUI(isActive, phone = "") {
             aiStatusPill.style.color = "var(--color-red)";
             aiStatusPill.style.borderColor = "rgba(255, 62, 85, 0.2)";
         }
+    }
+}
+
+// ==========================================================================
+/* Operator Availability Toggle Handlers */
+// ==========================================================================
+async function loadOperatorState() {
+    try {
+        const res = await fetch("/api/v1/operator-state/");
+        if (res.ok) {
+            const data = await res.json();
+            updateOperatorSwitchUI(data.available);
+        }
+    } catch (err) {
+        console.warn("Failed to load operator state:", err);
+    }
+}
+
+async function handleOperatorSwitchToggle(e) {
+    const isChecked = e.target.checked;
+    try {
+        const res = await fetch("/api/v1/operator-state/toggle/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ available: isChecked })
+        });
+        if (res.ok) {
+            const data = await res.json();
+            updateOperatorSwitchUI(data.available);
+        }
+    } catch (err) {
+        console.error("Failed to toggle operator availability:", err);
+        e.target.checked = !isChecked; // Revert checkbox on error
+    }
+}
+
+function updateOperatorSwitchUI(available) {
+    const switchEl = document.getElementById("operator-available-switch");
+    const stateText = document.getElementById("operator-state-text");
+    const descText = document.getElementById("operator-desc-text");
+
+    if (switchEl) {
+        switchEl.checked = available;
+    }
+
+    if (available) {
+        if (stateText) stateText.innerText = "Operator Available";
+        if (descText) descText.innerText = "If busy, calls fail over to backup lineman.";
+    } else {
+        if (stateText) stateText.innerText = "Operator Offline";
+        if (descText) descText.innerText = "Calls route directly to backup operator.";
+    }
+}
+
+// ==========================================================================
+/* Supervisor Dashboard Analytics */
+// ==========================================================================
+async function fetchAnalytics() {
+    try {
+        const res = await fetch("/api/v1/analytics/");
+        if (res.ok) {
+            const data = await res.json();
+            const totalCallsEl = document.getElementById("analytics-total-calls");
+            const aiResolvedEl = document.getElementById("analytics-ai-resolved");
+            const forwardedEl = document.getElementById("analytics-forwarded");
+            const emergencyEl = document.getElementById("analytics-emergency");
+            const avgDurationEl = document.getElementById("analytics-avg-duration");
+            
+            if (totalCallsEl) totalCallsEl.innerText = data.total_calls;
+            if (aiResolvedEl) aiResolvedEl.innerText = data.ai_resolved;
+            if (forwardedEl) forwardedEl.innerText = data.forwarded;
+            if (emergencyEl) emergencyEl.innerText = data.emergency_calls;
+            if (avgDurationEl) avgDurationEl.innerText = `${data.avg_duration} sec`;
+        }
+    } catch (err) {
+        console.warn("Failed to load analytics data:", err);
     }
 }
 
@@ -1010,6 +1095,49 @@ function endConsumerCall() {
     }
 
     document.getElementById("call-status").style.color = "var(--color-electric)";
+
+    // Save call log to database
+    try {
+        const chatContainer = document.getElementById("transcription-chat");
+        let transcriptText = "";
+        if (chatContainer) {
+            const bubbles = chatContainer.querySelectorAll(".chat-bubble");
+            bubbles.forEach(bubble => {
+                if (bubble.classList.contains("user")) {
+                    transcriptText += `Consumer: ${bubble.innerText}\n`;
+                } else if (bubble.classList.contains("assistant")) {
+                    transcriptText += `AI: ${bubble.innerText}\n`;
+                } else {
+                    transcriptText += `${bubble.innerText}\n`;
+                }
+            });
+        }
+        
+        let status = "Completed";
+        const lowerTranscript = transcriptText.toLowerCase();
+        if (lowerTranscript.includes("emergency") || lowerTranscript.includes("spark") || lowerTranscript.includes("smoke") || lowerTranscript.includes("పొగ") || lowerTranscript.includes("వైర్") || lowerTranscript.includes("danger")) {
+            status = "Emergency";
+        } else if (document.getElementById("call-status").innerText.includes("SPEAKING") || lowerTranscript.includes("forwarding") || lowerTranscript.includes("transfer") || (avatar && avatar.classList.contains("forwarding"))) {
+            status = "Forwarded";
+        }
+
+        const formData = new FormData();
+        formData.append("caller_number", "+91 9999999999"); // Mock number for simulator calls
+        formData.append("transcript", transcriptText || `Consumer: ${activeDialerQuery}`);
+        formData.append("status", status);
+        formData.append("duration", callDuration);
+
+        fetch("/api/v1/call-logs/", {
+            method: "POST",
+            body: formData
+        }).then(res => {
+            if (res.ok) {
+                fetchAnalytics();
+            }
+        }).catch(err => console.warn("Failed to upload call log:", err));
+    } catch (e) {
+        console.warn("Error processing call log upload:", e);
+    }
 }
 
 // ==========================================================================
@@ -1023,6 +1151,7 @@ async function fetchOutages() {
         const data = await res.json();
         renderAdminGrid(data.outages);
         fetchRecentCallLogs();
+        fetchAnalytics(); // Refresh supervisor dashboard analytics
     } catch (err) {
         console.warn("Failed loading outages data:", err);
     }

@@ -9,3 +9,4 @@ twilio==7.17.0
 speechrecognition==3.8.1
 sqlalchemy==1.4.22
 aiofiles==0.7.0
+google-generativeai>=0.3.0

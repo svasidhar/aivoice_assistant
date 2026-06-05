@@ -79,6 +79,26 @@ class DatabaseManager:
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS outage_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                area TEXT NOT NULL,
+                issue TEXT,
+                eta TEXT,
+                status TEXT,
+                updated_by TEXT,
+                timestamp TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS caller_memory (
+                phone TEXT PRIMARY KEY,
+                last_area TEXT NOT NULL,
+                last_called TIMESTAMP
+            )
+        ''')
+
         # Safely add cadre column if the table was created under the older schema
         try:
             cursor.execute("ALTER TABLE users ADD COLUMN cadre TEXT DEFAULT 'LM'")
@@ -88,6 +108,12 @@ class DatabaseManager:
         # Safely add reason column to outages if table already existed
         try:
             cursor.execute("ALTER TABLE outages ADD COLUMN reason TEXT")
+        except sqlite3.OperationalError:
+            pass # Column already exists
+
+        # Safely add duration column to call_logs if table already existed
+        try:
+            cursor.execute("ALTER TABLE call_logs ADD COLUMN duration INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass # Column already exists
 
@@ -110,6 +136,14 @@ class DatabaseManager:
         if cursor.fetchone()[0] == 0:
             cursor.execute("INSERT INTO assistant_settings (key, value) VALUES ('ai_assistant_active', 'true')")
             cursor.execute("INSERT INTO assistant_settings (key, value) VALUES ('lineman_phone', '+91 9876543210')")
+
+        # Seed operator availability status if empty
+        cursor.execute("SELECT COUNT(*) FROM assistant_settings WHERE key = 'operator_available'")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("INSERT INTO assistant_settings (key, value) VALUES ('operator_available', 'true')")
+        cursor.execute("SELECT COUNT(*) FROM assistant_settings WHERE key = 'backup_operator_phone'")
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("INSERT INTO assistant_settings (key, value) VALUES ('backup_operator_phone', '+91 9876543211')")
 
         # Seed default user if empty
         cursor.execute("SELECT COUNT(*) FROM users")
@@ -146,6 +180,12 @@ class DatabaseManager:
                 INSERT INTO outages (area, issue, eta, status, last_updated, staff_name, reason)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (area, issue, eta, status, datetime.now().isoformat(), staff_name, reason))
+
+        # Log to outage history
+        cursor.execute('''
+            INSERT INTO outage_history (area, issue, eta, status, updated_by, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (area, issue, eta, status, staff_name or "Unknown Staff", datetime.now().isoformat()))
 
         conn.commit()
         conn.close()
@@ -227,9 +267,22 @@ class DatabaseManager:
         cursor.execute("SELECT value FROM assistant_settings WHERE key = 'lineman_phone'")
         phone_res = cursor.fetchone()
         phone = phone_res[0] if phone_res else "+91 9876543210"
+
+        cursor.execute("SELECT value FROM assistant_settings WHERE key = 'operator_available'")
+        avail_res = cursor.fetchone()
+        operator_available = (avail_res[0].lower() == 'true') if avail_res else True
+
+        cursor.execute("SELECT value FROM assistant_settings WHERE key = 'backup_operator_phone'")
+        backup_res = cursor.fetchone()
+        backup_phone = backup_res[0] if backup_res else "+91 9876543211"
         
         conn.close()
-        return {"is_active": is_active, "lineman_phone": phone}
+        return {
+            "is_active": is_active, 
+            "lineman_phone": phone,
+            "operator_available": operator_available,
+            "backup_operator_phone": backup_phone
+        }
 
     def set_assistant_state(self, is_active: bool) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -240,6 +293,66 @@ class DatabaseManager:
         
         conn.commit()
         conn.close()
+
+    def set_operator_availability(self, available: bool) -> None:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        val_str = 'true' if available else 'false'
+        cursor.execute("UPDATE assistant_settings SET value = ? WHERE key = 'operator_available'", (val_str,))
+        
+        conn.commit()
+        conn.close()
+
+    def set_backup_operator_phone(self, phone: str) -> None:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("UPDATE assistant_settings SET value = ? WHERE key = 'backup_operator_phone'", (phone,))
+        
+        conn.commit()
+        conn.close()
+
+    def get_caller_memory(self, phone: str) -> Optional[str]:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT last_area FROM caller_memory WHERE phone = ?", (phone,))
+        res = cursor.fetchone()
+        conn.close()
+        return res[0] if res else None
+
+    def update_caller_memory(self, phone: str, last_area: str):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT 1 FROM caller_memory WHERE phone = ?", (phone,))
+        exists = cursor.fetchone()
+        
+        from datetime import datetime
+        if exists:
+            cursor.execute("UPDATE caller_memory SET last_area = ?, last_called = ? WHERE phone = ?", (last_area, datetime.now().isoformat(), phone))
+        else:
+            cursor.execute("INSERT INTO caller_memory (phone, last_area, last_called) VALUES (?, ?, ?)", (phone, last_area, datetime.now().isoformat()))
+        
+        conn.commit()
+        conn.close()
+
+    def get_recent_call_count(self, caller_number: str) -> int:
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        from datetime import datetime, timedelta
+        one_hour_ago = (datetime.now() - timedelta(hours=1)).isoformat()
+        
+        cursor.execute('''
+            SELECT COUNT(*) FROM call_logs 
+            WHERE caller_number = ? AND timestamp > ?
+        ''', (caller_number, one_hour_ago))
+        
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
 
     def create_user(self, name: str, phone: str, substation: str, staff_id: str, password: str, cadre: str = "LM") -> bool:
         conn = sqlite3.connect(self.db_path)
@@ -272,14 +385,14 @@ class DatabaseManager:
             }
         return None
 
-    def save_call_log(self, caller_number: str, transcript: str, audio_path: str, status: str) -> int:
+    def save_call_log(self, caller_number: str, transcript: str, audio_path: str, status: str, duration: int = 0) -> int:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         cursor.execute('''
-            INSERT INTO call_logs (caller_number, timestamp, transcript, audio_path, status)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (caller_number, datetime.now().isoformat(), transcript, audio_path, status))
+            INSERT INTO call_logs (caller_number, timestamp, transcript, audio_path, status, duration)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (caller_number, datetime.now().isoformat(), transcript, audio_path, status, duration))
         
         inserted_id = cursor.lastrowid
         conn.commit()
@@ -290,7 +403,7 @@ class DatabaseManager:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        cursor.execute("SELECT id, caller_number, timestamp, transcript, audio_path, status FROM call_logs ORDER BY id DESC")
+        cursor.execute("SELECT id, caller_number, timestamp, transcript, audio_path, status, duration FROM call_logs ORDER BY id DESC")
         results = cursor.fetchall()
         conn.close()
         
@@ -302,7 +415,8 @@ class DatabaseManager:
                 "timestamp": res[2],
                 "transcript": res[3],
                 "audio_path": res[4],
-                "status": res[5]
+                "status": res[5],
+                "duration": res[6]
             })
         return logs
 

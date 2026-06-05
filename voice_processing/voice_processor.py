@@ -81,7 +81,7 @@ class VoiceProcessor:
         eta = area_info.get('eta', '30 minutes')
         
         # Friendly natural Telugu-English conversational mix
-        response = f"{area} area lo {issue} undi sir. Staff clear chestunnaru. Approximately {eta} padutundi. Meeru dayachesi cooperate cheyandi sir."
+        response = f"Namaskaram andi. {area} area lo {issue} samasya undi. Maa staff daanni clear chestunnaru. Approximately {eta} samayam padutundi. Meeru dayachesi cooperate cheyandi andi."
         return response
 
     def process_voice_note(self, audio_file_path: str) -> Dict:

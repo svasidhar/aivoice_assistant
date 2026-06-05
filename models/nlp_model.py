@@ -32,19 +32,19 @@ class EntityExtractor:
     def __init__(self):
         # Bilingual area mappings: Standardized English Name -> [List of English & Telugu triggers]
         self.area_mappings = {
-            "Ramanapet": ["ramanapet", "రామన్నపేట", "రామన్నపేట్", "రమణపేట", "రామన్న పేట"],
-            "Cherlapally": ["cherlapally", "చర్లపల్లి", "చార్లపల్లి", "చర్లపల్లిలో"],
-            "Siddipet": ["siddipet", "సిద్దిపేట", "సిద్దిపేట్", "సిద్ది పేట"],
-            "Narketpally": ["narketpally", "narkatpally", "నార్కట్పల్లి", "నార్కట్‌పల్లి", "నార్కెట్‌పల్లి", "నార్కట్ పల్లి", "నార్కెట్ పల్లి"],
-            "Choutuppal": ["choutuppal", "చౌటుప్పల్", "చౌటుప్పల్ లో", "చౌటుప్పల్ ప్రదేశం"],
-            "Nakrekal": ["nakrekal", "నకిరేకల్", "నకిరేకల్ లో"],
-            "Nizamabad": ["nizamabad", "నిజామాబాద్", "నిజామాబాదు"],
-            "Warangal": ["warangal", "వరంగల్", "వరంగల్లు"],
-            "Karimnagar": ["karimnagar", "కరీంనగర్", "కరీంనగరు"],
-            "Khammam": ["khammam", "ఖమ్మం", "ఖమ్మము"],
-            "Nalgonda": ["nalgonda", "నల్గొండ", "నల్లగొండ"],
-            "Suryapet": ["suryapet", "సూర్యాపేట", "సూర్యాపేట్"],
-            "Mahabubnagar": ["mahabubnagar", "మహబూబ్ నగర్", "మహబూబ్నగర్"]
+            "Ramanapet": ["ramanapet", "ramanapeta", "ramanapet lo", "ramannapet", "రామన్నపేట", "రామన్నపేట్", "రమణపేట", "రామన్న పేట"],
+            "Cherlapally": ["cherlapally", "cherlapally lo", "cherlapalli", "చర్లపల్లి", "చార్లపల్లి", "చర్లపల్లిలో"],
+            "Siddipet": ["siddipet", "siddipet lo", "siddipeta", "సిద్దిపేట", "సిద్దిపేట్", "సిద్ది పేట"],
+            "Narketpally": ["narketpally", "narketpalli", "narketpally lo", "narkatpally", "నార్కట్పల్లి", "నార్కట్‌పల్లి", "నార్కెట్‌పల్లి", "నార్కట్ పల్లి", "నార్కెట్ పల్లి"],
+            "Choutuppal": ["choutuppal", "choutuppal lo", "చౌటుప్పల్", "చౌటుప్పల్ లో", "చౌటుప్పల్ ప్రదేశం"],
+            "Nakrekal": ["nakrekal", "nakrekal lo", "నకిరేకల్", "నకిరేకల్ లో"],
+            "Nizamabad": ["nizamabad", "nizamabad lo", "నిజామాబాద్", "నిజామాబాదు"],
+            "Warangal": ["warangal", "warangal lo", "వరంగల్", "వరంగల్లు"],
+            "Karimnagar": ["karimnagar", "karimnagar lo", "కరీంనగర్", "కరీంనగరు"],
+            "Khammam": ["khammam", "khammam lo", "ఖమ్మం", "ఖమ్మము"],
+            "Nalgonda": ["nalgonda", "nalgonda lo", "నల్గొండ", "నల్లగొండ"],
+            "Suryapet": ["suryapet", "suryapet lo", "సూర్యాపేట", "సూర్యాపేట్"],
+            "Mahabubnagar": ["mahabubnagar", "mahabubnagar lo", "మహబూబ్ నగర్", "మహబూబ్నగర్"]
         }
 
         # Bilingual issue mappings: Standardized Issue Name -> [List of English & Telugu triggers]

@@ -69,6 +69,8 @@ import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.asRequestBody
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
@@ -76,8 +78,12 @@ import retrofit2.http.GET
 import retrofit2.http.POST
 import retrofit2.http.Multipart
 import retrofit2.http.Part
+import retrofit2.http.Field
+import retrofit2.http.FormUrlEncoded
 import android.media.MediaPlayer
+import android.media.MediaRecorder
 import java.util.Locale
+import java.io.File
 
 // ==========================================================================
 // RETROFIT API LAYER DEFINITION
@@ -137,6 +143,32 @@ data class CallLogsResponse(
     val logs: List<CallLog>
 )
 
+data class RouteCallResponse(
+    val status: String,
+    val message: String?
+)
+
+data class Entities(
+    val area: String?,
+    val issue: String?,
+    val eta: String?,
+    val status: String?
+)
+
+data class ProcessedInfo(
+    val intent: String,
+    val entities: Entities,
+    val is_emergency: Boolean,
+    val confidence: Float,
+    val text: String
+)
+
+data class VoiceNoteResponse(
+    val message: String,
+    val transcribed_text: String,
+    val processed_info: ProcessedInfo
+)
+
 interface TgspdclApiService {
     @GET("api/v1/assistant-state/")
     suspend fun getAssistantState(): AssistantState
@@ -170,27 +202,74 @@ interface TgspdclApiService {
         @Part("status") status: RequestBody,
         @Part file: MultipartBody.Part?
     ): Any
+
+    @Multipart
+    @POST("api/v1/voice-note/")
+    suspend fun uploadVoiceNote(
+        @Part file: MultipartBody.Part
+    ): VoiceNoteResponse
+
+    @POST("api/v1/route-call/")
+    @FormUrlEncoded
+    suspend fun routeCall(
+        @Field("caller_number") callerNumber: String,
+        @Field("destination_number") destinationNumber: String
+    ): RouteCallResponse
 }
 
-class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
-    private var tts: TextToSpeech? = null
-    private var speechRecognizer: SpeechRecognizer? = null
+class MainActivity : ComponentActivity() {
     private val mainScope = CoroutineScope(Dispatchers.Main + Job())
+    private var mediaRecorder: MediaRecorder? = null
+    private var voiceFile: File? = null
 
     private var serverHost = "10.0.2.2:8000"
     private var apiService: TgspdclApiService? = null
+
+    fun startAudioRecording() {
+        try {
+            val file = File.createTempFile("voice_note_", ".mp4", cacheDir)
+            voiceFile = file
+            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(this)
+            } else {
+                @Suppress("DEPRECATION")
+                MediaRecorder()
+            }.apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setOutputFile(file.absolutePath)
+                prepare()
+                start()
+            }
+            Log.d("AudioRecord", "Recording started successfully")
+        } catch (e: Exception) {
+            Log.e("AudioRecord", "Failed to start audio recording: ${e.message}", e)
+        }
+    }
+
+    fun stopAudioRecording(): File? {
+        try {
+            mediaRecorder?.apply {
+                stop()
+                release()
+            }
+        } catch (e: Exception) {
+            Log.e("AudioRecord", "Failed to stop recording: ${e.message}", e)
+        }
+        mediaRecorder = null
+        return voiceFile
+    }
 
     // Call state variables
     private val isCallActiveState = mutableStateOf(false)
     private val callerNumberState = mutableStateOf("")
     private val callTranscriptState = mutableStateListOf<Pair<String, String>>() // Pair of (Sender, Message)
     private val isForwardedToOperatorState = mutableStateOf(false)
-    private val isTtsSpeakingState = mutableStateOf(false)
-    private var conversationStep = 0
-    private var detectedArea = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.e("AI_CALL", "APP STARTED")
 
         // Show on lock screen
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -208,12 +287,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         val sharedPrefs = getSharedPreferences("TGSPDCL_PREFS", Context.MODE_PRIVATE)
         val savedHost = sharedPrefs.getString("server_host", "10.0.2.2:8000") ?: "10.0.2.2:8000"
         updateApiService(savedHost)
-
-        // Initialize TTS
-        tts = TextToSpeech(this, this)
-
-        // Initialize SpeechRecognizer
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
 
         checkAndRequestPermissions()
         handleIntent(intent)
@@ -241,15 +314,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     fun updateApiService(host: String) {
-        var cleanHost = host.trim()
-        if (cleanHost.startsWith("http://")) {
-            cleanHost = cleanHost.substring(7)
-        } else if (cleanHost.startsWith("https://")) {
-            cleanHost = cleanHost.substring(8)
-        }
-        if (cleanHost.endsWith("/")) {
-            cleanHost = cleanHost.substring(0, cleanHost.length - 1)
-        }
+        val cleanHost = host.trim().removePrefix("http://").removePrefix("https://").removeSuffix("/")
         serverHost = cleanHost
         
         val logger = HttpLoggingInterceptor().apply {
@@ -271,24 +336,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale("te", "IN"))
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                tts?.setLanguage(Locale.US)
-            }
-        }
-    }
-
     private fun handleIntent(intent: Intent?) {
-        if (intent != null) {
-            if (intent.getBooleanExtra("EXTRA_INCOMING_CALL", false)) {
-                val number = intent.getStringExtra("EXTRA_CALLER_NUMBER") ?: "Unknown Number"
-                startCallScreening(number)
-            } else if (intent.getBooleanExtra("EXTRA_END_CALL", false)) {
-                endCall()
-            }
-        }
+        // Local telephony intents are no longer processed on the device.
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -331,256 +380,13 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     fun startCallScreening(callerNumber: String) {
-        isCallActiveState.value = true
-        isForwardedToOperatorState.value = false
-        callerNumberState.value = callerNumber
-        callTranscriptState.clear()
-
-        conversationStep = 0
-        detectedArea = ""
-
-        callTranscriptState.add("System" to "Incoming call from unknown number $callerNumber intercepted.")
-
-        val greeting = "Hello sir, TGSPDCL assistant. Cheppandi sir."
-        callTranscriptState.add("AI Assistant" to greeting)
-
-        speakText(greeting) {
-            listenToCaller()
-        }
-    }
-
-    private fun performCallTransfer(forwardNumber: String) {
-        triggerOperatorForward()
-        // Wait 1.5 seconds, then initiate ACTION_CALL
-        mainScope.launch {
-            delay(1500)
-            try {
-                if (checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED) {
-                    val callIntent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$forwardNumber")).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    startActivity(callIntent)
-                    Log.d("MainActivity", "Programmatic call forwarding to $forwardNumber initiated.")
-                } else {
-                    val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$forwardNumber")).apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    startActivity(dialIntent)
-                    Log.d("MainActivity", "Fallback call dial to $forwardNumber initiated.")
-                }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Failed to forward call: ${e.message}")
-            }
-        }
-    }
-
-    private fun speakText(text: String, onDone: () -> Unit = {}) {
-        isTtsSpeakingState.value = true
-        val params = Bundle()
-        params.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "utterance_id")
-        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(utteranceId: String?) {}
-            override fun onDone(utteranceId: String?) {
-                runOnUiThread {
-                    isTtsSpeakingState.value = false
-                    onDone()
-                }
-            }
-            @Deprecated("Deprecated in Java")
-            override fun onError(utteranceId: String?) {
-                runOnUiThread {
-                    isTtsSpeakingState.value = false
-                }
-            }
-        })
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "utterance_id")
-    }
-
-    private fun listenToCaller() {
-        if (isForwardedToOperatorState.value || !isCallActiveState.value) return
-
-        runOnUiThread {
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, "te-IN")
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            }
-            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    Log.d("STT", "Ready for speech")
-                }
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() {}
-                override fun onError(error: Int) {
-                    Log.e("STT", "Error code: $error")
-                    if (isCallActiveState.value && !isForwardedToOperatorState.value && !isTtsSpeakingState.value) {
-                        listenToCaller()
-                    }
-                }
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        val query = matches[0]
-                        callTranscriptState.add("Consumer" to query)
-                        processQueryWithBackend(query)
-                    } else {
-                        listenToCaller()
-                    }
-                }
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-            speechRecognizer?.startListening(intent)
-        }
-    }
-
-    private fun processQueryWithBackend(query: String) {
-        val service = apiService ?: return
-        val sharedPrefs = getSharedPreferences("TGSPDCL_PREFS", Context.MODE_PRIVATE)
-        val forwardNumber = sharedPrefs.getString("substation_forward_number", "+919876543210") ?: "+919876543210"
-
-        mainScope.launch {
-            try {
-                val cleanQuery = query.lowercase(Locale.ROOT)
-                var responseText = ""
-                var shouldForward = false
-
-                if (conversationStep == 0) {
-                    // Turn 1: Hello -> Hello
-                    if (cleanQuery.contains("hello") || cleanQuery.contains("hi") || cleanQuery.contains("namaskaram")) {
-                        responseText = "Hello sir. Cheppandi, em samasya undi?"
-                        conversationStep = 1
-                    } else if (cleanQuery.contains("current") || cleanQuery.contains("power") || cleanQuery.contains("ledhu") || cleanQuery.contains("ledu")) {
-                        responseText = "aa area sir?"
-                        conversationStep = 2
-                    } else {
-                        responseText = "Hello sir. Cheppandi, em samasya undi?"
-                        conversationStep = 1
-                    }
-                } 
-                else if (conversationStep == 1) {
-                    // Turn 2: Consumer says "current ledhu sir"
-                    if (cleanQuery.contains("current") || cleanQuery.contains("power") || cleanQuery.contains("ledhu") || cleanQuery.contains("ledu")) {
-                        responseText = "aa area sir?"
-                        conversationStep = 2
-                    } else {
-                        responseText = "oka 2 minutues adagandee me call maa oka substation ke kaluputhamuu valle kee chanpandee ne oka samasyaa."
-                        shouldForward = true
-                    }
-                }
-                else if (conversationStep == 2) {
-                    // Turn 3: Consumer says area name (e.g. Ramanapet or Cherlapally)
-                    var area = ""
-                    if (cleanQuery.contains("ramanapet")) area = "Ramanapet"
-                    else if (cleanQuery.contains("cherlapally") || cleanQuery.contains("charla")) area = "Cherlapally"
-                    else if (cleanQuery.contains("siddipet")) area = "Siddipet"
-                    else if (cleanQuery.contains("narketpally")) area = "Narketpally"
-
-                    if (area.isNotEmpty()) {
-                        detectedArea = area
-                        val res = withContext(Dispatchers.IO) {
-                            service.postConsumerQuery(ConsumerQueryRequest(area = area, query = query))
-                        }
-                        responseText = res.response
-                        shouldForward = res.forwarded
-                        conversationStep = 3
-                    } else {
-                        // Check if it is a complex/unrelated query to avoid getting stuck
-                        val isComplex = cleanQuery.contains("spark") || cleanQuery.contains("smoke") || cleanQuery.contains("poga") || 
-                                        cleanQuery.contains("wire") || cleanQuery.contains("sound") || cleanQuery.contains("noise") || 
-                                        cleanQuery.contains("transformer") || cleanQuery.contains("operator") || cleanQuery.contains("officer") || 
-                                        cleanQuery.contains("lineman") || cleanQuery.contains("lm") || cleanQuery.contains("substation") || 
-                                        cleanQuery.contains("meter") || cleanQuery.contains("bill") || cleanQuery.contains("complaint") ||
-                                        cleanQuery.contains("evaru") || cleanQuery.contains("who") || cleanQuery.contains("why")
-                        if (isComplex) {
-                            responseText = "oka 2 minutues adagandee me call maa oka substation ke kaluputhamuu valle kee chanpandee ne oka samasyaa."
-                            shouldForward = true
-                        } else {
-                            responseText = "Dayachesi area peru cheppandi sir. Ramanapet aa leka Cherlapally aa?"
-                        }
-                    }
-                }
-                else if (conversationStep == 3) {
-                    // Turn 4: Consumer asks "antha tim paduthundee" (ETA query)
-                    if (cleanQuery.contains("tim") || cleanQuery.contains("time") || cleanQuery.contains("eta") || cleanQuery.contains("eppudu") || cleanQuery.contains("ganta") || cleanQuery.contains("hour") || cleanQuery.contains("minute")) {
-                        if (detectedArea.isNotEmpty()) {
-                            val res = withContext(Dispatchers.IO) {
-                                service.postConsumerQuery(ConsumerQueryRequest(area = detectedArea, query = query))
-                            }
-                            responseText = res.response
-                            shouldForward = res.forwarded
-                            conversationStep = 4
-                        } else {
-                            responseText = "oka 30 minutes padutundi sir. Staff work chestunnaru."
-                            conversationStep = 4
-                        }
-                    } else {
-                        responseText = "oka 2 minutues adagandee me call maa oka substation ke kaluputhamuu valle kee chanpandee ne oka samasyaa."
-                        shouldForward = true
-                    }
-                }
-                else {
-                    responseText = "oka 2 minutues adagandee me call maa oka substation ke kaluputhamuu valle kee chanpandee ne oka samasyaa."
-                    shouldForward = true
-                }
-
-                callTranscriptState.add("AI Assistant" to responseText)
-
-                speakText(responseText) {
-                    if (shouldForward) {
-                        performCallTransfer(forwardNumber)
-                    } else {
-                        listenToCaller()
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Error sending query to server: ${e.message}", e)
-                val errorMsg = "Substation network loading error. Operator connection standby."
-                callTranscriptState.add("AI Assistant" to errorMsg)
-                speakText(errorMsg) {
-                    performCallTransfer(forwardNumber)
-                }
-            }
-        }
-    }
-
-    private fun triggerOperatorForward() {
-        isForwardedToOperatorState.value = true
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        audioManager.isSpeakerphoneOn = false
-        Log.d("MainActivity", "Speakerphone disabled. Switch to earpiece.")
-        playForwardAlert()
-    }
-
-    private fun playForwardAlert() {
-        try {
-            val notificationUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-            val ringtone = RingtoneManager.getRingtone(applicationContext, notificationUri)
-            ringtone?.play()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        // Local screening is disabled in favor of cloud-based voice assistant screening.
     }
 
     private fun endCall() {
         isCallActiveState.value = false
         isForwardedToOperatorState.value = false
         callTranscriptState.clear()
-
-        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        audioManager.mode = AudioManager.MODE_NORMAL
-        audioManager.isSpeakerphoneOn = false
-
-        speechRecognizer?.stopListening()
-        Toast.makeText(this, "Call Ended", Toast.LENGTH_SHORT).show()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        tts?.shutdown()
-        speechRecognizer?.destroy()
     }
 }
 
@@ -626,21 +432,6 @@ fun MainLinemanScreen() {
     // Tabs state
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabTitles = listOf("Home", "Status", "Call Logs", "Profile")
-
-    var isServiceScreeningActive by remember { mutableStateOf(sharedPrefs.getBoolean("is_ai_screening_active", false)) }
-    val listener = remember {
-        SharedPreferences.OnSharedPreferenceChangeListener { prefs, key ->
-            if (key == "is_ai_screening_active") {
-                isServiceScreeningActive = prefs.getBoolean("is_ai_screening_active", false)
-            }
-        }
-    }
-    DisposableEffect(sharedPrefs) {
-        sharedPrefs.registerOnSharedPreferenceChangeListener(listener)
-        onDispose {
-            sharedPrefs.unregisterOnSharedPreferenceChangeListener(listener)
-        }
-    }
 
     // Server IP Config
     var serverHost by remember { mutableStateOf(sharedPrefs.getString("server_host", "10.0.2.2:8000") ?: "10.0.2.2:8000") }
@@ -734,6 +525,7 @@ fun MainLinemanScreen() {
     ) { isGranted ->
         if (isGranted) {
             isRecording = true
+            (context as? MainActivity)?.startAudioRecording()
         } else {
             Toast.makeText(context, "Permission needed to record", Toast.LENGTH_SHORT).show()
         }
@@ -1128,12 +920,37 @@ fun MainLinemanScreen() {
                                                         .clickable {
                                                             if (isRecording) {
                                                                 isRecording = false
-                                                                parsedText = "Cherlapally area lo line breakdown ayyindi. Oka ganta (1 hour) padutundi. Staff work chestunnaru."
-                                                                editArea = "Cherlapally"
-                                                                editIssue = "Line Breakdown"
-                                                                editEta = "1 hour"
-                                                                editStatus = "In Progress"
-                                                                hasParsedResult = true
+                                                                val file = (context as? MainActivity)?.stopAudioRecording()
+                                                                if (file != null && apiService != null) {
+                                                                    coroutineScope.launch {
+                                                                        try {
+                                                                            isLoading = true
+                                                                            val requestFile = file.asRequestBody("audio/mp4".toMediaTypeOrNull())
+                                                                            val filePart = MultipartBody.Part.createFormData("file", file.name, requestFile)
+                                                                            val res = withContext(Dispatchers.IO) {
+                                                                                apiService.uploadVoiceNote(filePart)
+                                                                            }
+                                                                            parsedText = res.transcribed_text
+                                                                            editArea = res.processed_info.entities.area ?: "Unknown"
+                                                                            editIssue = res.processed_info.entities.issue ?: "Unknown"
+                                                                            editEta = res.processed_info.entities.eta ?: "Not Specified"
+                                                                            editStatus = res.processed_info.entities.status ?: "In Progress"
+                                                                            
+                                                                            val confidence = res.processed_info.confidence
+                                                                            if (confidence < 0.7f) {
+                                                                                Toast.makeText(context, "Voice note unclear (Confidence: ${"%.2f".format(confidence)}). Please review details carefully.", Toast.LENGTH_LONG).show()
+                                                                            } else {
+                                                                                Toast.makeText(context, "Voice note processed successfully!", Toast.LENGTH_SHORT).show()
+                                                                            }
+                                                                            hasParsedResult = true
+                                                                        } catch (e: Exception) {
+                                                                            Log.e("UploadVoice", "Failed to upload: ${e.message}", e)
+                                                                            Toast.makeText(context, "Failed to parse voice note: ${e.message}", Toast.LENGTH_LONG).show()
+                                                                        } finally {
+                                                                            isLoading = false
+                                                                        }
+                                                                    }
+                                                                }
                                                             } else {
                                                                 val status = ContextCompat.checkSelfPermission(
                                                                     context,
@@ -1141,6 +958,7 @@ fun MainLinemanScreen() {
                                                                 )
                                                                 if (status == PackageManager.PERMISSION_GRANTED) {
                                                                     isRecording = true
+                                                                    (context as? MainActivity)?.startAudioRecording()
                                                                 } else {
                                                                     permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                                                 }
@@ -1419,12 +1237,7 @@ fun MainLinemanScreen() {
                                         Spacer(modifier = Modifier.height(12.dp))
 
                                         val permissions = listOf(
-                                            Manifest.permission.READ_PHONE_STATE to "Read Phone State",
-                                            Manifest.permission.READ_CALL_LOG to "Read Call Log",
-                                            Manifest.permission.READ_CONTACTS to "Read Contacts",
-                                            Manifest.permission.ANSWER_PHONE_CALLS to "Answer Calls",
-                                            Manifest.permission.RECORD_AUDIO to "Record Audio (Mic)",
-                                            Manifest.permission.CALL_PHONE to "Direct Calling (Forward)"
+                                            Manifest.permission.RECORD_AUDIO to "Record Audio (Mic)"
                                         )
 
                                         permissions.forEach { (perm, name) ->
@@ -1733,61 +1546,28 @@ fun MainLinemanScreen() {
 
                                 Spacer(modifier = Modifier.height(24.dp))
 
-                                // Test Service Simulator Tools Card
-                                val isServiceActive = isServiceScreeningActive
+                                // Cloud Telephony Information Card
                                 Card(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .border(1.dp, if (isServiceActive) ColorGreen.copy(alpha = 0.4f) else ColorAmber.copy(alpha = 0.25f), RoundedCornerShape(16.dp)),
-                                    colors = CardDefaults.cardColors(containerColor = if (isServiceActive) ColorGreen.copy(alpha = 0.05f) else ColorAmber.copy(alpha = 0.05f)),
+                                        .border(1.dp, ColorElectric.copy(alpha = 0.4f), RoundedCornerShape(16.dp)),
+                                    colors = CardDefaults.cardColors(containerColor = ColorElectric.copy(alpha = 0.05f)),
                                     shape = RoundedCornerShape(16.dp)
                                 ) {
                                     Column(modifier = Modifier.padding(16.dp)) {
                                         Text(
-                                            text = if (isServiceActive) "🤖 ACTIVE CALL SCREENING SIMULATION" else "🧪 TEST RUNNER SIMULATION",
+                                            text = "☁️ CLOUD VOICE ASSISTANT ACTIVE",
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = if (isServiceActive) ColorGreen else ColorAmber,
+                                            color = ColorElectric,
                                             letterSpacing = 1.sp
                                         )
                                         Spacer(modifier = Modifier.height(8.dp))
                                         Text(
-                                            text = if (isServiceActive) "AI is currently screening a call in the background. The lineman's screen remains clean and undisturbed. You can listen afterwards in the 'Call Logs' tab." else "Manually trigger the background Call Screening Service to test the Telugu speech screening flow, the automated call forwarding, and Call Logs registration without placing a real cellular call.",
+                                            text = "The AI Voice Call Assistant has been successfully migrated to the cloud (via Twilio/Exotel webhooks). All customer calls are handled by the cloud servers. Call transcripts and recordings will sync automatically and can be reviewed under the 'Call Logs' tab.",
                                             fontSize = 11.sp,
                                             color = TextSecondary
                                         )
-                                        Spacer(modifier = Modifier.height(16.dp))
-                                        
-                                        if (isServiceActive) {
-                                            Button(
-                                                onClick = {
-                                                    val stopIntent = Intent(context, CallScreeningService::class.java).apply {
-                                                        action = "STOP_SCREENING"
-                                                    }
-                                                    context.startService(stopIntent)
-                                                    Toast.makeText(context, "Hang up signal sent to service", Toast.LENGTH_SHORT).show()
-                                                },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = ColorRed)
-                                            ) {
-                                                Text("Simulate Hang Up (End Screening)", fontSize = 12.sp, color = TextPrimary, fontWeight = FontWeight.Bold)
-                                            }
-                                        } else {
-                                            Button(
-                                                onClick = {
-                                                    val serviceIntent = Intent(context, CallScreeningService::class.java).apply {
-                                                        action = "START_SCREENING"
-                                                        putExtra("EXTRA_CALLER_NUMBER", "+91 99999 88888")
-                                                    }
-                                                    ContextCompat.startForegroundService(context, serviceIntent)
-                                                    Toast.makeText(context, "Call Screening Service Simulated", Toast.LENGTH_SHORT).show()
-                                                },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                colors = ButtonDefaults.buttonColors(containerColor = ColorAmber)
-                                            ) {
-                                                Text("Simulate Incoming Call (Start Screening)", fontSize = 12.sp, color = Color.Black, fontWeight = FontWeight.Bold)
-                                            }
-                                        }
                                     }
                                 }
                             }

@@ -1,6 +1,6 @@
 # main.py
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,7 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 # Import mounted execution routes
 from api.routes import router as main_router, exotel_router
 from api.staff_routes import router as staff_router
-from api.websocket_handler import ws_router
 from config.settings import Config
 
 # Execute runtime environmental validations
@@ -38,8 +37,11 @@ app.include_router(exotel_router)
 # 2. Milestone 1: Staff Voice Note Processing Node
 app.include_router(staff_router)
 
-# 3. Live Streaming Node: Asynchronous Full-Duplex Voice Engine
-app.include_router(ws_router)
+# 3. Live Streaming Node: Asynchronous Full-Duplex Voice Engine (mounted directly on app)
+@app.websocket("/exotel-stream/voice")
+async def exotel_voice_stream(websocket: WebSocket):
+    from api.websocket_handler import handle_exotel_voice_stream
+    await handle_exotel_voice_stream(websocket)
 
 # ─── DASHBOARD PORTAL ASSETS MOUNTING ───
 static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")

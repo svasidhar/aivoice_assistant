@@ -6,9 +6,9 @@ from datetime import datetime
 import sqlite3
 
 # Import our modules
-from ..models.database import DatabaseManager
-from ..voice_processing.voice_processor import VoiceProcessor
-from ..config.settings import Config
+from models.database import DatabaseManager
+from voice_processing.voice_processor import VoiceProcessor
+from config.settings import Config
 
 # Initialize components
 router = APIRouter(prefix="/api/v1", tags=["staff_updates"])

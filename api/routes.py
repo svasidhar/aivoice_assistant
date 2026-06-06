@@ -968,3 +968,93 @@ async def voice_respond(
     )
 
     return Response(content=str(response), media_type="application/xml")
+
+# ==========================================================================
+# EXOTEL VOICEBOT INTEGRATION ROUTER
+# ==========================================================================
+import logging
+logger = logging.getLogger("uvicorn.error")
+exotel_router = APIRouter(prefix="/exotel", tags=["Exotel Voicebot Integration"])
+
+class OutageQueryRequest(BaseModel):
+    caller_phone: str
+    forwarded_from: Optional[str] = None
+    extracted_area: str
+
+class OutageQueryResponse(BaseModel):
+    status: str
+    area_found: bool
+    message: str
+    can_escalate: bool
+    substation_number: str
+
+@exotel_router.post("/check-outage", response_model=OutageQueryResponse)
+async def check_outage_status(payload: OutageQueryRequest):
+    # Retrieve substation line from DB settings if exists, otherwise fallback
+    try:
+        settings = db.get_assistant_state()
+        SUBSTATION_LINE = settings.get("lineman_phone", "+91 9876543210")
+    except Exception:
+        SUBSTATION_LINE = "+919876543210" # Safe hardcoded fallback
+
+    search_area = payload.extracted_area.strip()
+    
+    try:
+        # 1. Attempt to connect and fetch data
+        conn = db.get_connection()
+        cursor = conn.cursor()
+        
+        # Check area outage in outages table (case-insensitive search)
+        cursor.execute(
+            "SELECT issue, eta, status FROM outages WHERE LOWER(area) = LOWER(?)", 
+            (search_area,)
+        )
+        row = cursor.fetchone()
+        
+        # Log query history safely into consumer_queries using existing schema
+        cursor.execute(
+            "INSERT INTO consumer_queries (area, query, response, timestamp) VALUES (?, ?, ?, ?)",
+            (
+                search_area, 
+                f"Exotel Caller: {payload.caller_phone}", 
+                f"Status: {row['status'] if row else 'Area Missing'}", 
+                datetime.now().isoformat()
+            )
+        )
+        conn.commit()
+        conn.close()
+        
+        # Scenario A: Data found successfully
+        if row:
+            issue, eta = row["issue"] or "Power Outage", row["eta"] or "Pending"
+            return OutageQueryResponse(
+                status="Success",
+                area_found=True,
+                message=f"{search_area} లో ప్రస్తుతం {issue} సమస్య ఉంది. సిబ్బంది పని చేస్తున్నారు. సుమారుగా {eta} పడుతుంది.",
+                can_escalate=False,
+                substation_number=SUBSTATION_LINE
+            )
+        
+        # Scenario B: Server works, but area data is missing/unable to answer
+        else:
+            logger.warning(f"Area not found in DB: {search_area}")
+            return OutageQueryResponse(
+                status="Area Missing",
+                area_found=False,
+                message="క్షమించండి, మీ ఏరియా సమాచారం మా సిస్టమ్లో ప్రస్తుతానికి అప్డేట్ కాలేదు.",
+                can_escalate=True,  # Signal the AI to transfer
+                substation_number=SUBSTATION_LINE
+            )
+            
+    except Exception as e:
+        # Scenario C: Critical Fetch Failure (SQLite locked up, connection dropped, etc.)
+        logger.error(f"CRITICAL BACKEND FAILURE: {str(e)}")
+        
+        # We return a clean fallback instead of letting the server throw a 500 Internal Error
+        return OutageQueryResponse(
+            status="Backend Failure",
+            area_found=False,
+            message="సమస్యను తనిఖీ చేయడంలో సిస్టమ్లో సాంకేతిక లోపం ఏర్పడింది.",
+            can_escalate=True,  # Force immediate transfer
+            substation_number=SUBSTATION_LINE
+        )

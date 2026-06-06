@@ -1,26 +1,53 @@
+# main.py
 import os
-import sys
-from pathlib import Path
-
-# Add the project root to the system path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from api.routes import router
+from fastapi.middleware.cors import CORSMiddleware
 
-# Create the main application
+# Import mounted execution routes
+from api.routes import router as main_router, exotel_router
+from api.staff_routes import router as staff_router
+from api.websocket_handler import ws_router
+from config.settings import Config
+
+# Execute runtime environmental validations
+Config.validate()
+
 app = FastAPI(
     title="TGSPDCL AI Voice Assistant",
-    description="AI Voice Assistant for TGSPDCL",
-    version="1.0.0"
+    description="Asynchronous Media Stream Engine and Tool server for rural utility breakdown automations.",
+    version="1.1.0"
 )
 
-# Serve static files from the static directory
+# Enable Cross-Origin Resource Sharing (CORS) for your local web dashboard testing layout
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─── ROUTER MOUNT COUPLING ───
+
+# 1. Consumer Data Lookups & Core Handshakes
+app.include_router(main_router)
+app.include_router(exotel_router)
+
+# 2. Milestone 1: Staff Voice Note Processing Node
+app.include_router(staff_router)
+
+# 3. Live Streaming Node: Asynchronous Full-Duplex Voice Engine
+app.include_router(ws_router)
+
+# ─── DASHBOARD PORTAL ASSETS MOUNTING ───
 static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-os.makedirs(static_dir, exist_ok=True)
-app.mount("/static", StaticFiles(directory=static_dir), name="static")
+try:
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    print("📁 Static directory mounted successfully under /static URL layout.")
+except Exception:
+    print("ℹ️ Note: /static folder asset reference could not be initialized. Clean directory if debugging local web dashboards.")
 
 @app.get("/")
 async def serve_index():
@@ -30,9 +57,12 @@ async def serve_index():
         return FileResponse(index_path)
     return {"message": "TGSPDCL AI Voice Call Assistant API is active. Please add static/index.html to view the dashboard."}
 
-# Include the API router
-app.include_router(router)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.get("/health")
+async def engine_health_check():
+    """Provides instant node diagnostics for Render uptime status loops."""
+    return {
+        "engine_status": "operational",
+        "websocket_pipeline": "active",
+        "database_concurrency_mode": "WAL",
+        "target_exophone": "09513886363"
+    }

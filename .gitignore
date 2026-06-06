@@ -1,0 +1,23 @@
+# Environments
+.env
+.env.local
+.env.*
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Databases
+*.db
+*.sqlite3
+
+# Scratch and OS files
+.DS_Store
+scratch/
+
+# Local Gradle and Build folders for Android
+mobile/.gradle/
+mobile/app/build/
+mobile/.idea/
+mobile/local.properties

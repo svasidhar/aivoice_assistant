@@ -6,7 +6,10 @@ from datetime import datetime
 import json
 import sqlite3
 import sys
+import logging
 from twilio.twiml.voice_response import VoiceResponse, Gather
+
+logger = logging.getLogger("uvicorn.error")
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -684,68 +687,26 @@ async def create_call_log(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving call log: {str(e)}")
 
-@router.post("/voice/incoming")
+@router.get("/voice/incoming")
 async def voice_incoming(
-    From_: str = Form(..., alias="From"),
-    CallSid: str = Form(...)
+    CallSid: Optional[str] = None,
+    From: Optional[str] = None,
+    To: Optional[str] = None,
+    CallFrom: Optional[str] = None,
+    CallTo: Optional[str] = None,
+    Direction: Optional[str] = None,
+    flow_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
+    CurrentTime: Optional[str] = None
 ):
-    """Webhook for incoming Twilio calls"""
-    response = VoiceResponse()
-    settings = db.get_assistant_state()
-    transfer_phone = get_transfer_phone(settings)
+    """
+    Accepts incoming call webhooks from Exotel via HTTP GET requests.
+    """
+    logger.info(f"📞 Caught Incoming Exotel GET Call! SID: {CallSid} | From: {From} to To: {To}")
     
-    # 1. Abuse Protection Check (max 10 calls per hour)
-    recent_calls = db.get_recent_call_count(From_)
-    if recent_calls >= 10:
-        response.say("Mee number nundi e roju chala sarlu call chesaru andi. Dayachesi aagandi, call ni operator ki forward chestunnamu.", language="te-IN")
-        response.dial(transfer_phone)
-        db.save_call_log(
-            caller_number=From_,
-            transcript="[Abuse Protection - Limit Exceeded, Transferred to Operator]",
-            audio_path="",
-            status="Forwarded"
-        )
-        return Response(content=str(response), media_type="application/xml")
-    
-    if not settings.get("is_active", True):
-        # AI assistant is inactive. Forward to lineman operator immediately.
-        response.say("Namaskaram andi. Maa AI call assistant ippudu offline lo undi. Mee call ni substation operator ki forward chestunnamu. Oka minute line lo undandi.", language="te-IN")
-        response.dial(transfer_phone)
-        
-        # Log call log
-        db.save_call_log(
-            caller_number=From_,
-            transcript="[AI Assistant Offline - Forwarded to Operator]",
-            audio_path="",
-            status="Forwarded"
-        )
-        return Response(content=str(response), media_type="application/xml")
-
-    # 2. Caller Location Memory query for custom greeting
-    last_area = db.get_caller_memory(From_)
-    
-    # If assistant is active, prompt for speech gather, specifying turn=1
-    gather = Gather(
-        input="speech",
-        language="te-IN",
-        action="/api/v1/voice/respond?turn=1",
-        method="POST",
-        timeout=5
-    )
-    
-    if last_area:
-        greeting_text = f"Namaskaram andi. TGSPDCL AI Voice Call Assistant ki swagatam. Mee {last_area} area gurinche adugutunnara andi? Leda mee area mariyu samasya ento cheppandi."
-    else:
-        greeting_text = "Namaskaram andi. TGSPDCL AI Voice Call Assistant ki swagatam. Mee area peru mariyu mee samasya ento cheppandi."
-        
-    gather.say(greeting_text, language="te-IN")
-    response.append(gather)
-    
-    # If no speech was input, redirect/fallback to lineman operator
-    response.say("Mee nundi elaanti prathispandana ledandi. Call ni operator ki forward chestunnamu.", language="te-IN")
-    response.dial(transfer_phone)
-    
-    return Response(content=str(response), media_type="application/xml")
+    # Exotel Passthru applets look for a text string or 200 OK 
+    # to smoothly execute the 'Success' path branch on the canvas.
+    return Response(content="OK", media_type="text/plain", status_code=200)
 
 @router.post("/voice/respond")
 async def voice_respond(

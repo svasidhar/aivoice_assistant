@@ -7,6 +7,8 @@
 [![Sarvam AI](https://img.shields.io/badge/Sarvam_AI-orange?style=for-the-badge)](https://www.sarvam.ai/)
 [![Exotel](https://img.shields.io/badge/Exotel_Telephony-blue?style=for-the-badge)](https://exotel.com/)
 
+👉 **GitHub Repository**: [https://github.com/svasidhar/lineman-ai-assistant](https://github.com/svasidhar/lineman-ai-assistant)
+
 An AI-powered cloud telephony voice agent and background call-screening companion designed to assist TGSPDCL (Telangana State Southern Power Distribution Company Limited) linemen. The system automatically intercepts unknown consumer calls, interacts with callers in polite, regional Telugu, validates power outage queries against a live SQLite grid, and routes complex requests or emergencies to substation operators asynchronously.
 
 ---
@@ -81,7 +83,7 @@ sequenceDiagram
 ## 📂 Project Directory Structure
 
 ```plaintext
-aivoice_assistant/
+lineman-ai-assistant/
 ├── api/
 │   ├── routes.py             # Core REST API endpoints (GET /incoming webhooks, auth, user queries)
 │   ├── staff_routes.py       # Lineman voice update endpoints (Milestone 1)

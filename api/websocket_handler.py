@@ -81,22 +81,28 @@ async def handle_exotel_voice_stream(websocket: WebSocket):
     finally:
         pass
 
-async def send_audio_chunk(websocket: WebSocket, session: AudioStreamSession, pcm_bytes: bytes):
-    """Slices raw PCM data into 3,200-byte frames (100ms chunks) for real-time telecom playback."""
-    CHUNK_SIZE = 3200  
-    for i in range(0, len(pcm_bytes), CHUNK_SIZE):
-        chunk = pcm_bytes[i:i + CHUNK_SIZE]
-        if len(chunk) < CHUNK_SIZE:
-            chunk = chunk.ljust(CHUNK_SIZE, b'\x00')
-            
-        b64_payload = base64.b64encode(chunk).decode("utf-8")
-        response_payload = {
+async def send_audio_chunk(websocket: WebSocket, pcm_bytes: bytes):
+    """
+    Encodes raw PCM audio bytes to base64 and wraps them in the 
+    exact JSON text frame format required by Exotel's Media Stream.
+    """
+    try:
+        # 1. Convert the raw binary audio bytes into a base64 string
+        base64_audio = base64.b64encode(pcm_bytes).decode("utf-8")
+        
+        # 2. Build the structured media frame required by the telephony gateway
+        exotel_media_frame = {
             "event": "media",
-            "stream_sid": session.stream_sid,
-            "media": {"payload": b64_payload}
+            "media": {
+                "payload": base64_audio
+            }
         }
-        await websocket.send_text(json.dumps(response_payload))
-        await asyncio.sleep(0.1)
+        
+        # 3. Send it as a text string frame, NOT as raw binary bytes
+        await websocket.send_text(json.dumps(exotel_media_frame))
+        
+    except Exception as e:
+        print(f"💥 Failed to package or send audio frame to Exotel: {str(e)}")
 
 async def trigger_initial_greeting(websocket: WebSocket, session: AudioStreamSession):
     """Sends the initial prompt asking the villager for their location name."""
@@ -206,6 +212,6 @@ async def render_and_send_tts(websocket: WebSocket, session: AudioStreamSession,
     if response.status_code == 200:
         raw_base64 = response.json().get("audios", [""])[0]
         pcm_bytes = base64.b64decode(raw_base64)
-        await send_audio_chunk(websocket, session, pcm_bytes)
+        await send_audio_chunk(websocket, pcm_bytes)
     else:
         print(f"❌ Sarvam TTS Engine failed with status code: {response.status_code}")

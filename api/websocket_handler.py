@@ -79,7 +79,13 @@ async def handle_exotel_voice_stream(websocket: WebSocket):
 
     try:
         while True:
-            raw_message = await websocket.receive_text()
+            try:
+                raw_message = await websocket.receive_text()
+            except RuntimeError as starlette_err:
+                if "not connected" in str(starlette_err).lower():
+                    logger.info("🔌 Call disconnected by client or telecom carrier while processing. Exiting loop cleanly.")
+                    break
+                raise starlette_err
             packet = json.loads(raw_message)
             event_type = packet.get("event")
 

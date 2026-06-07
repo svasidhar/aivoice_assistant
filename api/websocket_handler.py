@@ -196,22 +196,43 @@ def query_outage_database(area_name: str) -> tuple[str, bool]:
     return "", True
 
 async def render_and_send_tts(websocket: WebSocket, session: AudioStreamSession, text_to_speak: str):
-    """Invokes Sarvam AI Bulbul model to turn Telugu text into matching 8kHz linear PCM audio frames."""
-    headers = {"API-Subscription-Key": Config.SARVAM_API_KEY}
-    payload = {
-        "inputs": [text_to_speak],
-        "target_language_code": "te-IN",
-        "speaker": "meera",
-        "model": "bulbul:v1",
-        "audio_format": "pcm_8000"  # Perfect match configuration for Exotel's media player
+    """
+    Invokes Sarvam AI Bulbul model to turn Telugu text into matching 
+    8kHz linear PCM audio frames.
+    """
+    headers = {
+        "api-subscription-key": Config.SARVAM_API_KEY,
+        "Content-Type": "application/json"
     }
     
-    async with httpx.AsyncClient() as client:
-        response = await client.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=6.0)
-        
-    if response.status_code == 200:
-        raw_base64 = response.json().get("audios", [""])[0]
-        pcm_bytes = base64.b64decode(raw_base64)
-        await send_audio_chunk(websocket, pcm_bytes)
-    else:
-        print(f"❌ Sarvam TTS Engine failed with status code: {response.status_code}")
+    # Corrected payload structure matching Sarvam's exact REST API schema
+    payload = {
+        "text": text_to_speak,
+        "target_language_code": "te-IN",
+        "speaker": "shubh",
+        "model": "bulbul:v3",
+        "speech_sample_rate": 8000,    # FIXED: Changed from sample_rate to speech_sample_rate
+        "output_audio_codec": "wav"    # Explicitly requests clean WAV container
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(SARVAM_TTS_URL, headers=headers, json=payload, timeout=6.0)
+            
+        if response.status_code == 200:
+            raw_base64 = response.json().get("audios", [""])[0]
+            audio_bytes = base64.b64decode(raw_base64)
+            
+            # Strip the 44-byte RIFF header to deliver pure PCM stream data to Exotel
+            if audio_bytes.startswith(b'RIFF'):
+                pcm_bytes = audio_bytes[44:]
+            else:
+                pcm_bytes = audio_bytes
+                
+            await send_audio_chunk(websocket, pcm_bytes)
+        else:
+            print(f"❌ Sarvam TTS Engine failed with status code: {response.status_code}")
+            print(f"📄 Diagnostic Details: {response.text}")
+            
+    except Exception as e:
+        print(f"💥 Failed to execute text-to-speech request: {str(e)}")

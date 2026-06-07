@@ -26,9 +26,10 @@ SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
 
 class AudioStreamSession:
     """Manages call state and binary audio buffers for individual active callers."""
-    def __init__(self, stream_sid: str, caller_phone: str):
+    def __init__(self, stream_sid: str, caller_phone: str, call_sid: str = ""):
         self.stream_sid = stream_sid
         self.caller_phone = caller_phone
+        self.call_sid = call_sid
         self.audio_buffer = bytearray()
         self.is_speaking = False
 
@@ -96,8 +97,9 @@ async def handle_exotel_voice_stream(websocket: WebSocket):
                 start_meta = packet["start"]
                 stream_sid = packet["stream_sid"]
                 caller_num = start_meta.get("from", "Unknown")
+                call_sid = start_meta.get("callSid", "")
                 
-                session = AudioStreamSession(stream_sid, caller_num)
+                session = AudioStreamSession(stream_sid, caller_num, call_sid)
                 logger.info(f"📞 Live Call Stream Started! ID: {stream_sid} | From: {caller_num}")
                 
                 # Instantly play a welcoming greeting to the user
@@ -205,17 +207,13 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
         outage_msg, can_escalate = query_outage_database(extracted_area)
 
         if can_escalate:
-            reply_text = "మీ కాల్ మా ఒక సబ్స్టేషన్ ఆపరేటర్కు పంపుతున్నాము, వెయిట్ చేయండి. మీ సమస్య వారికి చెప్పండి."
-        else:
-            reply_text = outage_msg
-
-        # ─── STAGE 4: TEXT-TO-SPEECH TRANSMISSION ───
-        await render_and_send_tts(websocket, session, reply_text)
-        
-        if can_escalate:
+            await trigger_safety_escalation(websocket, session)
             logger.info("🚨 Safety escalation parameters triggered. Severing streaming session.")
             await websocket.close(code=1000)
             return
+        else:
+            # ─── STAGE 4: TEXT-TO-SPEECH TRANSMISSION ───
+            await render_and_send_tts(websocket, session, outage_msg)
 
     except Exception as e:
         logger.error(f"⚠️ Live AI process loop caught execution barrier: {str(e)}")
@@ -226,6 +224,59 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
     finally:
         session.audio_buffer.clear()
         session.is_speaking = False
+
+async def trigger_safety_escalation(websocket: WebSocket, session: AudioStreamSession):
+    """
+    Handles unknown areas by playing a clear audio fallback message 
+    and handing off routing without blocking the main thread.
+    """
+    logger.info("🚨 Safety escalation parameters triggered asynchronously.")
+    
+    try:
+        # 1. Say something back to the user instead of leaving them in silence
+        fallback_text = "క్షమించండి, మీ ఏరియా పేరు స్పష్టంగా అర్థం కాలేదు. దయచేసి లైన్ లోనే ఉండండి, మా ప్రతినిధికి కనెక్ట్ చేస్తున్నాము."
+        await render_and_send_tts(websocket, session, fallback_text)
+    except Exception as tts_err:
+        logger.error(f"⚠️ Fallback TTS play failed: {str(tts_err)}")
+        
+    try:
+        # 2. Trigger Exotel Connect API call routing asynchronously (if configured)
+        api_key = Config.EXOTEL_API_KEY
+        api_token = Config.EXOTEL_API_TOKEN
+        account_sid = Config.EXOTEL_ACCOUNT_SID
+        exophone = Config.EXOTEL_EXOPHONE
+        
+        caller_number = session.caller_phone
+        
+        if not api_key or not api_token or not account_sid or not exophone:
+            logger.warning("Exotel credentials not fully configured in environment. Escalation simulated.")
+            return
+            
+        settings = db_manager.get_assistant_state()
+        if settings.get("operator_available", True):
+            destination_number = settings.get("lineman_phone", "+91 9876543210")
+        else:
+            destination_number = settings.get("backup_operator_phone", "+91 9876543211")
+            
+        url = f"https://api.in.exotel.com/v1/Accounts/{account_sid}/Calls/connect.json"
+        data = {
+            "From": caller_number,
+            "To": destination_number,
+            "CallerId": exophone,
+            "Record": "true"
+        }
+        
+        logger.info(f"📡 Triggering Exotel Connect API: routing {caller_number} to {destination_number}...")
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, auth=(api_key, api_token), data=data, timeout=6.0)
+            
+        if response.status_code == 200:
+            logger.info(f"✅ Exotel call routing initiated successfully: {response.json()}")
+        else:
+            logger.error(f"❌ Exotel API failed with status {response.status_code}: {response.text}")
+            
+    except Exception as e:
+        logger.error(f"⚠️ Escalation routing failed: {str(e)}")
 
 async def extract_area_from_text(user_speech_text: str) -> str:
     """

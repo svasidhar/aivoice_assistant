@@ -9,7 +9,10 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from models.database import DatabaseManager
 from config.settings import Config
 
-# Use the active Uvicorn error logger to bypass Render text buffering
+# ─── NEW GENAI SDK IMPLEMENTATION ───
+# Initialize the unified GenAI production client 
+# It will automatically inherit GEMINI_API_KEY from your .env file
+client = genai.Client()
 logger = logging.getLogger("uvicorn.error")
 
 ws_router = APIRouter(tags=["Exotel WebSocket Media Stream"])
@@ -189,7 +192,7 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
             return
 
         # ─── STAGE 2: GEMINI AREA EXTRACTION ───
-        extracted_area = await extract_area_with_gemini(user_transcript)
+        extracted_area = await extract_area_from_text(user_transcript)
         logger.info(f"📍 Extracted Target Area Element: {extracted_area}")
         
         # ─── STAGE 3: DB LOOKUP & FALLBACK VALIDATION ───
@@ -218,24 +221,30 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
         session.audio_buffer.clear()
         session.is_speaking = False
 
-async def extract_area_with_gemini(transcript: str) -> str:
-    """Uses Gemini to securely distill the raw colloquial transcript down to a clean area name string."""
+async def extract_area_from_text(user_speech_text: str) -> str:
+    """
+    Uses the modern GenAI SDK to async-parse the transcribed Telugu text
+    and extract a clean target region string.
+    """
+    prompt = f"""
+    You are an AI assistant for TGSPDCL. Extract the village or area name mentioned in this text.
+    Text: "{user_speech_text}"
+    Respond with ONLY the clean area name in English, or 'Unknown' if not found.
+    """
+    
     try:
-        client = genai.Client(api_key=Config.GEMINI_API_KEY)
-        prompt = f"""
-        Analyze this spoken text from an electricity consumer in Telangana: "{transcript}"
-        Identify the village, town, sub-station area, or neighborhood name they are asking about.
-        Return ONLY the capitalized English word of that location (e.g., 'Ramanapet', 'Cherlapally').
-        If no distinct area name or village is mentioned in the text, reply strictly with the word 'Unknown'.
-        Do not add punctuation, formatting, or extra sentences.
-        """
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
+        # Use client.aio for non-blocking execution inside your live WebSocket stream loop
+        response = await client.aio.models.generate_content(
+            model='gemini-1.5-flash',
             contents=prompt,
         )
-        return response.text.strip()
+        
+        extracted_text = response.text.strip() if response.text else "Unknown"
+        logger.info(f"📍 Modern GenAI Engine Extracted Area: {extracted_text}")
+        return extracted_text
+        
     except Exception as e:
-        logger.error(f"Gemini Processing Error: {e}")
+        logger.error(f"💥 Modern Gemini SDK Error: {str(e)}")
         return "Unknown"
 
 def query_outage_database(area_name: str) -> tuple[str, bool]:

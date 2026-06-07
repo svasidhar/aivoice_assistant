@@ -21,11 +21,14 @@ from config.settings import Config
 from models.nlp_model import CustomNLPModel
 
 try:
-    import google.generativeai as genai
+    from google import genai
     if Config.GEMINI_API_KEY:
-        genai.configure(api_key=Config.GEMINI_API_KEY)
+        genai_client = genai.Client(api_key=Config.GEMINI_API_KEY)
+    else:
+        genai_client = None
 except Exception as e:
-    print(f"Error importing or configuring google-generativeai: {e}")
+    print(f"Error importing or configuring google-genai: {e}")
+    genai_client = None
     genai = None
 
 # Initialize components
@@ -284,7 +287,7 @@ async def process_consumer_query(query: ConsumerQueryRequest):
         }
 
     # Use Gemini if key is provided and import succeeded
-    if genai and Config.GEMINI_API_KEY:
+    if genai_client and Config.GEMINI_API_KEY:
         try:
             prompt = f"""
             You are the TGSPDCL AI Voice Call Assistant, a friendly customer service assistant responding to a consumer on a phone call.
@@ -310,18 +313,18 @@ async def process_consumer_query(query: ConsumerQueryRequest):
             
             model_name = "gemini-1.5-flash"
             try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    prompt,
-                    generation_config={"response_mime_type": "application/json"}
+                response = genai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={"response_mime_type": "application/json"}
                 )
             except Exception as model_err:
                 print(f"Failed to use model {model_name}, trying gemini-2.5-flash: {model_err}")
                 model_name = "gemini-2.5-flash"
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    prompt,
-                    generation_config={"response_mime_type": "application/json"}
+                response = genai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={"response_mime_type": "application/json"}
                 )
             
             result = json.loads(response.text)
@@ -486,7 +489,7 @@ async def process_voice_note(file: UploadFile = File(...)):
         processed_info["confidence"] = confidence
 
         # Try Gemini if key is provided and config exists
-        if genai and Config.GEMINI_API_KEY and transcribed_text.strip():
+        if genai_client and Config.GEMINI_API_KEY and transcribed_text.strip():
             try:
                 prompt = f"""
                 You are a data extractor for a power distribution company. 
@@ -510,10 +513,10 @@ async def process_voice_note(file: UploadFile = File(...)):
                 }}
                 """
                 model_name = "gemini-1.5-flash"
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    prompt,
-                    generation_config={"response_mime_type": "application/json"}
+                response = genai_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={"response_mime_type": "application/json"}
                 )
                 result = json.loads(response.text)
                 processed_info["entities"]["area"] = result.get("area", area)
@@ -819,7 +822,7 @@ async def voice_respond(
                 priority = "normal"
 
             # Try Gemini if cache missed
-            if not response_text and genai and Config.GEMINI_API_KEY:
+            if not response_text and genai_client and Config.GEMINI_API_KEY:
                 try:
                     prompt = f"""
                     You are the TGSPDCL AI Voice Call Assistant, a friendly customer service assistant responding to a consumer on a phone call.
@@ -848,18 +851,18 @@ async def voice_respond(
                     """
                     model_name = "gemini-1.5-flash"
                     try:
-                        model = genai.GenerativeModel(model_name)
-                        gen_res = model.generate_content(
-                            prompt,
-                            generation_config={"response_mime_type": "application/json"}
+                        gen_res = genai_client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config={"response_mime_type": "application/json"}
                         )
                     except Exception as model_err:
                         print(f"Failed to use model {model_name}, trying gemini-2.5-flash: {model_err}")
                         model_name = "gemini-2.5-flash"
-                        model = genai.GenerativeModel(model_name)
-                        gen_res = model.generate_content(
-                            prompt,
-                            generation_config={"response_mime_type": "application/json"}
+                        gen_res = genai_client.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config={"response_mime_type": "application/json"}
                         )
                     
                     result = json.loads(gen_res.text)

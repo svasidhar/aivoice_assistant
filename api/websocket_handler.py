@@ -4,7 +4,7 @@ import base64
 import asyncio
 import httpx
 import logging
-import google.generativeai as genai
+from google import genai
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from models.database import DatabaseManager
 from config.settings import Config
@@ -15,8 +15,7 @@ logger = logging.getLogger("uvicorn.error")
 ws_router = APIRouter(tags=["Exotel WebSocket Media Stream"])
 db_manager = DatabaseManager()
 
-# Configure Gemini API
-genai.configure(api_key=Config.GEMINI_API_KEY)
+# Initializing genai_client is handled in the model calling functions
 
 # Sarvam AI Regional Indian Audio Processing Endpoints
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
@@ -222,7 +221,7 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
 async def extract_area_with_gemini(transcript: str) -> str:
     """Uses Gemini to securely distill the raw colloquial transcript down to a clean area name string."""
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        client = genai.Client(api_key=Config.GEMINI_API_KEY)
         prompt = f"""
         Analyze this spoken text from an electricity consumer in Telangana: "{transcript}"
         Identify the village, town, sub-station area, or neighborhood name they are asking about.
@@ -230,7 +229,10 @@ async def extract_area_with_gemini(transcript: str) -> str:
         If no distinct area name or village is mentioned in the text, reply strictly with the word 'Unknown'.
         Do not add punctuation, formatting, or extra sentences.
         """
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+        )
         return response.text.strip()
     except Exception as e:
         logger.error(f"Gemini Processing Error: {e}")

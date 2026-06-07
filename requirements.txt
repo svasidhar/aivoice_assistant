@@ -1,5 +1,5 @@
 # Requirements for AI Voice Assistant
-fastapi==0.68.0
+fastapi>=0.110.0
 uvicorn==0.15.0
 python-multipart==0.0.5
 openai==0.26.4
@@ -9,6 +9,6 @@ twilio==7.17.0
 speechrecognition==3.8.1
 sqlalchemy==1.4.22
 aiofiles==0.7.0
-google-generativeai>=0.8.0
+google-genai
 httpx>=0.20.0
 websockets

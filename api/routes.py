@@ -311,7 +311,7 @@ async def process_consumer_query(query: ConsumerQueryRequest):
             }}
             """
             
-            model_name = "gemini-1.5-flash"
+            model_name = "gemini-2.5-flash"
             try:
                 response = genai_client.models.generate_content(
                     model=model_name,
@@ -512,7 +512,7 @@ async def process_voice_note(file: UploadFile = File(...)):
                   "confidence": 0.0 to 1.0
                 }}
                 """
-                model_name = "gemini-1.5-flash"
+                model_name = "gemini-2.5-flash"
                 response = genai_client.models.generate_content(
                     model=model_name,
                     contents=prompt,
@@ -849,7 +849,7 @@ async def voice_respond(
                       "allow_guessing": false
                     }}
                     """
-                    model_name = "gemini-1.5-flash"
+                    model_name = "gemini-2.5-flash"
                     try:
                         gen_res = genai_client.models.generate_content(
                             model=model_name,

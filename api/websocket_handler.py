@@ -235,7 +235,7 @@ async def extract_area_from_text(user_speech_text: str) -> str:
     try:
         # Use client.aio for non-blocking execution inside your live WebSocket stream loop
         response = await client.aio.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt,
         )
         

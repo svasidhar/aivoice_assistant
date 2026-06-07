@@ -232,12 +232,8 @@ async def trigger_safety_escalation(websocket: WebSocket, session: AudioStreamSe
     """
     logger.info("🚨 Safety escalation parameters triggered asynchronously.")
     
-    try:
-        # 1. Say something back to the user instead of leaving them in silence
-        fallback_text = "క్షమించండి, మీ ఏరియా పేరు స్పష్టంగా అర్థం కాలేదు. దయచేసి లైన్ లోనే ఉండండి, మా ప్రతినిధికి కనెక్ట్ చేస్తున్నాము."
-        await render_and_send_tts(websocket, session, fallback_text)
-    except Exception as tts_err:
-        logger.error(f"⚠️ Fallback TTS play failed: {str(tts_err)}")
+    # Hand off call routing directly without playing fallback text to consumer
+    pass
         
     try:
         # 2. Trigger Exotel Connect API call routing asynchronously (if configured)

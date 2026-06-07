@@ -30,6 +30,42 @@ class AudioStreamSession:
         self.audio_buffer = bytearray()
         self.is_speaking = False
 
+def add_wav_header(pcm_data: bytes, sample_rate: int = 8000, num_channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Prepends a standard 44-byte RIFF WAV header to raw PCM data so STT engines parse it successfully."""
+    num_samples = len(pcm_data)
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    
+    header = bytearray(44)
+    # RIFF Identifier
+    header[0:4] = b'RIFF'
+    # Overall Size (36 + SubChunk2Size)
+    header[4:8] = (36 + num_samples).to_bytes(4, byteorder='little')
+    # WAVE Format
+    header[8:12] = b'WAVE'
+    # Format Subchunk Identifier
+    header[12:16] = b'fmt '
+    # Subchunk Size (16 for PCM)
+    header[16:20] = (16).to_bytes(4, byteorder='little')
+    # Audio Format (1 for PCM)
+    header[20:22] = (1).to_bytes(2, byteorder='little')
+    # Number of Channels (Mono)
+    header[22:24] = num_channels.to_bytes(2, byteorder='little')
+    # Sample Rate (8000 Hz)
+    header[24:28] = sample_rate.to_bytes(4, byteorder='little')
+    # Byte Rate
+    header[28:32] = byte_rate.to_bytes(4, byteorder='little')
+    # Block Align
+    header[32:34] = block_align.to_bytes(2, byteorder='little')
+    # Bits Per Sample (16 bit)
+    header[34:36] = bits_per_sample.to_bytes(2, byteorder='little')
+    # Data Subchunk Identifier
+    header[36:40] = b'data'
+    # Data Size
+    header[40:44] = num_samples.to_bytes(4, byteorder='little')
+    
+    return bytes(header) + pcm_data
+
 @ws_router.websocket("/exotel-stream/voice")
 async def handle_exotel_voice_stream(websocket: WebSocket):
     """Core full-duplex WebSocket endpoint managing raw binary audio exchange with Exotel."""
@@ -74,7 +110,11 @@ async def handle_exotel_voice_stream(websocket: WebSocket):
                 
                 # If buffer accumulates ~1.5 seconds of raw 8kHz audio, check for speech processing
                 if len(session.audio_buffer) >= 24000 and not session.is_speaking:
-                    await process_user_speech_turn(websocket, session)
+                    try:
+                        await process_user_speech_turn(websocket, session)
+                    except Exception as stt_packet_err:
+                        # Guard filter: Log error cleanly to keep the call line active during network recovery
+                        logger.error(f"⚠️ Buffered STT packet skip or processing error: {str(stt_packet_err)}")
 
             elif event_type == "clear":
                 logger.info("🛑 User barge-in detected. Flushing active output buffers.")
@@ -127,14 +167,18 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
 
     try:
         # ─── STAGE 1: SPEECH-TO-TEXT (STT) ───
-        files = {"file": ("caller_voice.wav", bytes(session.audio_buffer), "audio/wav")}
+        # Package raw pcm bytes inside a standard WAV header file layout
+        wav_data = add_wav_header(bytes(session.audio_buffer))
+        files = {"file": ("caller_voice.wav", wav_data, "audio/wav")}
         data = {"language_code": "te-IN"}
         
-        logger.info("📡 Sending accumulated voice buffer to Sarvam STT...")
+        logger.info("📡 Sending accumulated WAV voice buffer to Sarvam STT REST API...")
         async with httpx.AsyncClient() as client:
             stt_response = await client.post(SARVAM_STT_URL, headers=headers, files=files, data=data, timeout=7.0)
             
         if stt_response.status_code != 200:
+            logger.error(f"❌ Sarvam STT failed with status code: {stt_response.status_code}")
+            logger.error(f"📄 STT Diagnostic Details: {stt_response.text}")
             raise Exception("Sarvam STT Hub dropped the audio frame processing packet.")
             
         user_transcript = stt_response.json().get("transcript", "").strip()

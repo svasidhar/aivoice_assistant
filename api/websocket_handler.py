@@ -3,10 +3,14 @@ import json
 import base64
 import asyncio
 import httpx
+import logging
 import google.generativeai as genai
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from models.database import DatabaseManager
 from config.settings import Config
+
+# Use the active Uvicorn error logger to bypass Render text buffering
+logger = logging.getLogger("uvicorn.error")
 
 ws_router = APIRouter(tags=["Exotel WebSocket Media Stream"])
 db_manager = DatabaseManager()
@@ -30,9 +34,10 @@ class AudioStreamSession:
 async def handle_exotel_voice_stream(websocket: WebSocket):
     """Core full-duplex WebSocket endpoint managing raw binary audio exchange with Exotel."""
     await websocket.accept()
-    print("🔌 Exotel Telephony WebSocket Connection Handshake Accepted.")
+    logger.info("🔌 Exotel Telephony WebSocket Connection Handshake Accepted.")
     
     session: AudioStreamSession = None
+    media_packet_count = 0
 
     try:
         while True:
@@ -41,7 +46,7 @@ async def handle_exotel_voice_stream(websocket: WebSocket):
             event_type = packet.get("event")
 
             if event_type == "connected":
-                print("✅ Network connection established. Awaiting stream initialization...")
+                logger.info("✅ Network connection established. Awaiting stream initialization...")
                 
             elif event_type == "start":
                 start_meta = packet["start"]
@@ -49,7 +54,7 @@ async def handle_exotel_voice_stream(websocket: WebSocket):
                 caller_num = start_meta.get("from", "Unknown")
                 
                 session = AudioStreamSession(stream_sid, caller_num)
-                print(f"📞 Live Call Stream Started! ID: {stream_sid} | From: {caller_num}")
+                logger.info(f"📞 Live Call Stream Started! ID: {stream_sid} | From: {caller_num}")
                 
                 # Instantly play a welcoming greeting to the user
                 await trigger_initial_greeting(websocket, session)
@@ -57,6 +62,12 @@ async def handle_exotel_voice_stream(websocket: WebSocket):
             elif event_type == "media":
                 if not session:
                     continue
+                
+                media_packet_count += 1
+                # Every 20 audio frames (~2 seconds of speech), log telemetry to prove the server is listening
+                if media_packet_count % 20 == 0:
+                    logger.info(f"🎙️ [Stream Active] Successfully processed {media_packet_count} inbound voice packets from caller.")
+                
                 raw_payload = packet["media"]["payload"]
                 pcm_data = base64.b64decode(raw_payload)
                 session.audio_buffer.extend(pcm_data)
@@ -66,18 +77,18 @@ async def handle_exotel_voice_stream(websocket: WebSocket):
                     await process_user_speech_turn(websocket, session)
 
             elif event_type == "clear":
-                print("🛑 User barge-in detected. Flushing active output buffers.")
+                logger.info("🛑 User barge-in detected. Flushing active output buffers.")
                 if session:
                     session.audio_buffer.clear()
 
             elif event_type == "stop":
-                print(f"❌ Call session terminated by carrier network line drop: {packet.get('stream_sid')}")
+                logger.info(f"❌ Call session terminated by carrier network line drop: {packet.get('stream_sid')}")
                 break
 
     except WebSocketDisconnect:
-        print("🔌 WebSocket disconnected from remote client side.")
+        logger.info("🔌 WebSocket disconnected from remote client side.")
     except Exception as e:
-        print(f"💥 Stream Engine Crash: {str(e)}")
+        logger.error(f"💥 Stream Engine Crash: {str(e)}")
     finally:
         pass
 
@@ -102,7 +113,7 @@ async def send_audio_chunk(websocket: WebSocket, pcm_bytes: bytes):
         await websocket.send_text(json.dumps(exotel_media_frame))
         
     except Exception as e:
-        print(f"💥 Failed to package or send audio frame to Exotel: {str(e)}")
+        logger.error(f"💥 Failed to package or send audio frame to Exotel: {str(e)}")
 
 async def trigger_initial_greeting(websocket: WebSocket, session: AudioStreamSession):
     """Sends the initial prompt asking the villager for their location name."""
@@ -119,6 +130,7 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
         files = {"file": ("caller_voice.wav", bytes(session.audio_buffer), "audio/wav")}
         data = {"language_code": "te-IN"}
         
+        logger.info("📡 Sending accumulated voice buffer to Sarvam STT...")
         async with httpx.AsyncClient() as client:
             stt_response = await client.post(SARVAM_STT_URL, headers=headers, files=files, data=data, timeout=7.0)
             
@@ -126,7 +138,7 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
             raise Exception("Sarvam STT Hub dropped the audio frame processing packet.")
             
         user_transcript = stt_response.json().get("transcript", "").strip()
-        print(f"🗣️ Villager Said: \"{user_transcript}\"")
+        logger.info(f"🗣️ Villager Said: \"{user_transcript}\"")
         
         if not user_transcript:
             session.audio_buffer.clear()
@@ -135,7 +147,7 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
 
         # ─── STAGE 2: GEMINI AREA EXTRACTION ───
         extracted_area = await extract_area_with_gemini(user_transcript)
-        print(f"📍 Extracted Target Area Element: {extracted_area}")
+        logger.info(f"📍 Extracted Target Area Element: {extracted_area}")
         
         # ─── STAGE 3: DB LOOKUP & FALLBACK VALIDATION ───
         outage_msg, can_escalate = query_outage_database(extracted_area)
@@ -149,12 +161,12 @@ async def process_user_speech_turn(websocket: WebSocket, session: AudioStreamSes
         await render_and_send_tts(websocket, session, reply_text)
         
         if can_escalate:
-            print("🚨 Safety escalation parameters triggered. Severing streaming session.")
+            logger.info("🚨 Safety escalation parameters triggered. Severing streaming session.")
             await websocket.close(code=1000)
             return
 
     except Exception as e:
-        print(f"⚠️ Live AI process loop caught execution barrier: {str(e)}")
+        logger.error(f"⚠️ Live AI process loop caught execution barrier: {str(e)}")
         error_msg = "క్షమించండి, సమాచారం సేకరించడంలో లోపం దొరికింది. ఆపరేటర్ కి కనెక్ట్ చేస్తున్నాము."
         await render_and_send_tts(websocket, session, error_msg)
         await websocket.close(code=1000)
@@ -177,7 +189,7 @@ async def extract_area_with_gemini(transcript: str) -> str:
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
-        print(f"Gemini Processing Error: {e}")
+        logger.error(f"Gemini Processing Error: {e}")
         return "Unknown"
 
 def query_outage_database(area_name: str) -> tuple[str, bool]:
@@ -211,8 +223,8 @@ async def render_and_send_tts(websocket: WebSocket, session: AudioStreamSession,
         "target_language_code": "te-IN",
         "speaker": "shubh",
         "model": "bulbul:v3",
-        "speech_sample_rate": 8000,    # FIXED: Changed from sample_rate to speech_sample_rate
-        "output_audio_codec": "wav"    # Explicitly requests clean WAV container
+        "speech_sample_rate": 8000,
+        "output_audio_codec": "wav"
     }
     
     try:
@@ -231,8 +243,8 @@ async def render_and_send_tts(websocket: WebSocket, session: AudioStreamSession,
                 
             await send_audio_chunk(websocket, pcm_bytes)
         else:
-            print(f"❌ Sarvam TTS Engine failed with status code: {response.status_code}")
-            print(f"📄 Diagnostic Details: {response.text}")
+            logger.error(f"❌ Sarvam TTS Engine failed with status code: {response.status_code}")
+            logger.error(f"📄 Diagnostic Details: {response.text}")
             
     except Exception as e:
-        print(f"💥 Failed to execute text-to-speech request: {str(e)}")
+        logger.error(f"💥 Failed to execute text-to-speech request: {str(e)}")
